@@ -64,6 +64,21 @@ const TAB_NAMES = {
   spCampaigns60: "Sponsored Products Campaigns_60",
   sbCampaigns60: "Sponsored Brands Campaigns_60",
   sdCampaigns60: "Sponsored Display Campaigns_60",
+  // Walmart Connect bulk reports — three accounts × three windows + search terms
+  wmt1pCampaigns7: "wmt1p_campaigns_7",
+  wmt1pCampaigns30: "wmt1p_campaigns_30",
+  wmt1pCampaigns60: "wmt1p_campaigns_60",
+  wmt3pCampaigns7: "wmt3p_campaigns_7",
+  wmt3pCampaigns30: "wmt3p_campaigns_30",
+  wmt3pCampaigns60: "wmt3p_campaigns_60",
+  wmtotherCampaigns7: "wmtother_campaigns_7",
+  wmtotherCampaigns30: "wmtother_campaigns_30",
+  wmtotherCampaigns60: "wmtother_campaigns_60",
+  wmt1pSearchTerms: "wmt1p_search_terms",
+  wmt3pSearchTerms: "wmt3p_search_terms",
+  wmtotherSearchTerms: "wmtother_search_terms",
+  // amzsc traffic exports — Detail Page Sales and Traffic by Child Item
+  amzscTrafficPrefix: "amzsc_traffic_",
 };
 
 const SETTLEMENT_LOOKBACK_MONTHS = 18;
@@ -877,6 +892,29 @@ function ExportButton({ filename, rows, columns, label = "Export" }) {
   );
 }
 
+function MultiChannelWarning({ activeScope, channels, requiredChannel }) {
+  if (activeScope.length <= 1 && (!requiredChannel || activeScope[0] === requiredChannel)) return null;
+  if (activeScope.length === 1 && requiredChannel && activeScope[0] !== requiredChannel) {
+    const ch = channels.find((c) => c.code === requiredChannel);
+    return (
+      <div className="mb-4 rounded-2xl border border-amber-400/30 bg-amber-400/5 p-3 text-xs text-amber-200">
+        <p className="font-medium">This page requires <strong>{ch?.name || requiredChannel}</strong> in scope.</p>
+        <p className="mt-1 text-amber-300/80">Switch the channel scope in the sidebar to view this module.</p>
+      </div>
+    );
+  }
+  const first = activeScope[0];
+  const ch = channels.find((c) => c.code === first);
+  return (
+    <div className="mb-4 rounded-2xl border border-amber-400/30 bg-amber-400/5 p-3 text-xs text-amber-200">
+      <p className="font-medium">Multi-channel scope active ({activeScope.length} channels) — this page is channel-specific.</p>
+      <p className="mt-1 text-amber-300/80">
+        Showing data for <strong>{ch?.name || first}</strong> only. Aggregating modules (P&L, Channel Comparison) sum across the full scope.
+      </p>
+    </div>
+  );
+}
+
 function EmptyStateCard({ title, body, requiredSheets, icon: Icon = FileText }) {
   return (
     <div className="rounded-3xl border border-dashed border-slate-700 bg-slate-950 p-8">
@@ -1008,6 +1046,192 @@ function parseCampaignBulkSheet(sheet, adType) {
         roas: spend ? sales / spend : 0,
       };
     });
+}
+
+// =============================================================================
+// WALMART CONNECT BULK PARSERS — flexible header matching across 1P/3P/Other.
+// Walmart Connect exports vary by account type: column names like "Cost"
+// vs "Spend", "Attributed Sales 14d" vs "Sales", "Item ID" vs "Item Number"
+// are normalized via pick() with broad fallbacks. Anywhere I made a guess at
+// a column variant I left a TODO so it can be validated against a real export.
+// =============================================================================
+
+function parseWalmartCampaignBulkSheet(sheet, channelCode) {
+  if (!Array.isArray(sheet) || sheet.length === 0) return [];
+  return sheet
+    .map((row) => {
+      const campaignName = normalizeText(
+        pick(row, ["Campaign Name", "Campaign", "campaign name", "campaign"], "")
+      );
+      if (!campaignName) return null;
+      // TODO: validate against real export — Walmart often emits "Cost" not "Spend"
+      const spend = normalizeNumber(
+        pick(row, ["Spend", "Cost", "spend", "cost", "Spend (USD)", "Cost (USD)"], 0)
+      );
+      const sales = normalizeNumber(
+        pick(row, [
+          "Attributed Sales 14d",
+          "Attributed Sales 30d",
+          "Attributed Sales",
+          "Sales",
+          "Total Sales",
+          "Revenue",
+          "Sales (USD)",
+        ], 0)
+      );
+      const clicks = normalizeNumber(pick(row, ["Clicks", "clicks"], 0));
+      const impressions = normalizeNumber(pick(row, ["Impressions", "impressions"], 0));
+      const orders = normalizeNumber(
+        pick(row, ["Orders", "Attributed Orders 14d", "Attributed Orders", "orders"], 0)
+      );
+      return {
+        adType: "Walmart Sponsored Products",
+        channel: channelCode,
+        campaignName,
+        state: normalizeText(
+          pick(row, ["Campaign Status", "Status", "State", "campaign status", "status"], "—")
+        ),
+        impressions,
+        clicks,
+        spend,
+        sales,
+        orders,
+        ctr: impressions ? (clicks / impressions) * 100 : 0,
+        acos: sales ? (spend / sales) * 100 : 0,
+        roas: spend ? sales / spend : 0,
+      };
+    })
+    .filter(Boolean);
+}
+
+function parseWalmartSearchTerms(sheet, channelCode) {
+  if (!Array.isArray(sheet) || sheet.length === 0) return [];
+  return sheet
+    .map((row) => {
+      const searchTerm = normalizeText(
+        pick(
+          row,
+          ["Search Term", "Customer Search Term", "search term", "Query", "Search Query"],
+          ""
+        )
+      );
+      if (!searchTerm) return null;
+      const spend = normalizeNumber(pick(row, ["Spend", "Cost", "spend", "cost"], 0));
+      const sales = normalizeNumber(
+        pick(row, [
+          "Attributed Sales 14d",
+          "Attributed Sales",
+          "Sales",
+          "Total Sales",
+          "Revenue",
+        ], 0)
+      );
+      return {
+        adType: "Walmart Sponsored Products",
+        channel: channelCode,
+        campaign: normalizeText(pick(row, ["Campaign Name", "Campaign", "campaign"], "—")),
+        adGroup: normalizeText(pick(row, ["Ad Group Name", "Ad Group", "ad group"], "—")),
+        state: normalizeText(pick(row, ["Campaign Status", "Status", "State"], "—")),
+        keywordText: normalizeText(pick(row, ["Keyword", "Bidded Keyword", "Keyword Text"], "")),
+        matchType: normalizeText(pick(row, ["Match Type", "match type", "Bid Type"], "—")),
+        searchTerm,
+        clicks: normalizeNumber(pick(row, ["Clicks", "clicks"], 0)),
+        spend,
+        orders: normalizeNumber(
+          pick(row, ["Orders", "Attributed Orders 14d", "Attributed Orders"], 0)
+        ),
+        units: normalizeNumber(pick(row, ["Units", "Attributed Units 14d", "Attributed Units"], 0)),
+        sales,
+        impressions: normalizeNumber(pick(row, ["Impressions", "impressions"], 0)),
+        ctr: 0,
+        cvr: 0,
+      };
+    })
+    .filter(Boolean);
+}
+
+// =============================================================================
+// TRAFFIC SHEET PARSER — Detail Page Sales and Traffic by Child Item.
+// Header row auto-detection happens upstream in fetchSettlementSheet, so here
+// the rows arrive shaped like { "Child ASIN": ..., "Sessions - Total": ..., ... }.
+// Walmart equivalent could later use the same shape; for now this is amzsc-only.
+// =============================================================================
+
+function parseTrafficSheet(rows, ym) {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((r) => {
+      const asin = normalizeText(
+        pick(r, [
+          "(Child) ASIN",
+          "Child ASIN",
+          "child asin",
+          "ASIN",
+          "asin",
+          "(Parent) ASIN",
+        ], "")
+      ).toUpperCase();
+      if (!asin || !/^B0[A-Z0-9]{8}$/.test(asin)) return null;
+      const sessions = normalizeNumber(
+        pick(r, [
+          "Sessions - Total",
+          "Sessions Total",
+          "Sessions",
+          "sessions",
+          "Sessions – Total",
+        ], 0)
+      );
+      const pageViews = normalizeNumber(
+        pick(r, ["Page Views - Total", "Page Views", "page views"], 0)
+      );
+      const buyBoxPct = normalizeNumber(
+        pick(r, [
+          "Featured Offer (Buy Box) Percentage",
+          "Buy Box Percentage",
+          "Buy Box %",
+          "Featured Offer Percentage",
+        ], 0)
+      );
+      const unitsOrdered = normalizeNumber(
+        pick(r, ["Units Ordered", "units ordered", "Units"], 0)
+      );
+      const orderedSales = normalizeNumber(
+        pick(r, [
+          "Ordered Product Sales",
+          "ordered product sales",
+          "Ordered Product Sales – B2B",
+        ], 0)
+      );
+      const orderItemSessionPct = normalizeNumber(
+        pick(r, [
+          "Order Item Session Percentage",
+          "Order Item Session %",
+          "Unit Session Percentage",
+          "Conversion Rate",
+        ], 0)
+      );
+      // Buy box % below 100 implies missed sessions = OOS proxy, in days.
+      // 30-day month assumption. TODO: validate against real export.
+      const oosDays = buyBoxPct > 0 && buyBoxPct <= 1
+        ? Math.round((1 - buyBoxPct) * 30)
+        : buyBoxPct > 1 && buyBoxPct <= 100
+        ? Math.round((1 - buyBoxPct / 100) * 30)
+        : 0;
+      const asp = unitsOrdered > 0 ? orderedSales / unitsOrdered : 0;
+      return {
+        ym,
+        asin,
+        sessions,
+        pageViews,
+        buyBoxPct,
+        unitsOrdered,
+        orderedSales,
+        orderItemSessionPct,
+        asp,
+        oosDays,
+      };
+    })
+    .filter(Boolean);
 }
 
 function categorizeCampaign(trend) {
@@ -1177,6 +1401,21 @@ export default function App() {
   const [spCampaigns60, setSpCampaigns60] = useState([]);
   const [sbCampaigns60, setSbCampaigns60] = useState([]);
   const [sdCampaigns60, setSdCampaigns60] = useState([]);
+  // Walmart Connect bulk reports (1P / 3P / Other × 7/30/60 + search terms)
+  const [wmt1pCampaigns7, setWmt1pCampaigns7] = useState([]);
+  const [wmt1pCampaigns30, setWmt1pCampaigns30] = useState([]);
+  const [wmt1pCampaigns60, setWmt1pCampaigns60] = useState([]);
+  const [wmt3pCampaigns7, setWmt3pCampaigns7] = useState([]);
+  const [wmt3pCampaigns30, setWmt3pCampaigns30] = useState([]);
+  const [wmt3pCampaigns60, setWmt3pCampaigns60] = useState([]);
+  const [wmtotherCampaigns7, setWmtotherCampaigns7] = useState([]);
+  const [wmtotherCampaigns30, setWmtotherCampaigns30] = useState([]);
+  const [wmtotherCampaigns60, setWmtotherCampaigns60] = useState([]);
+  const [wmt1pSearchTermsRaw, setWmt1pSearchTermsRaw] = useState([]);
+  const [wmt3pSearchTermsRaw, setWmt3pSearchTermsRaw] = useState([]);
+  const [wmtotherSearchTermsRaw, setWmtotherSearchTermsRaw] = useState([]);
+  // amzsc Detail Page Sales and Traffic by Child Item — { yyyy-mm: rows[] }
+  const [trafficByMonth, setTrafficByMonth] = useState({});
   const [settlementByMonth, setSettlementByMonth] = useState({});
 
   useEffect(() => {
@@ -1184,7 +1423,15 @@ export default function App() {
       try {
         setLoading(true);
 
-        const [chCfg, cogs, fixed, itemRef, spCamp, sbCamp, sdCamp, spTerms, sbTerms, invFba, invAwd, prod30d, saleMon, fbmOnlySheet, spCamp7, sbCamp7, sdCamp7, spCamp60, sbCamp60, sdCamp60] = await Promise.all([
+        const safe = (tab) => fetchSheet(tab).catch(() => []);
+        const [
+          chCfg, cogs, fixed, itemRef,
+          spCamp, sbCamp, sdCamp, spTerms, sbTerms,
+          invFba, invAwd, prod30d, saleMon, fbmOnlySheet,
+          spCamp7, sbCamp7, sdCamp7, spCamp60, sbCamp60, sdCamp60,
+          w1p7, w1p30, w1p60, w3p7, w3p30, w3p60, woth7, woth30, woth60,
+          w1pSt, w3pSt, wothSt,
+        ] = await Promise.all([
           fetchSheet(TAB_NAMES.channelConfig),
           fetchSheet(TAB_NAMES.cogs),
           fetchSheet(TAB_NAMES.fixedCostsMonthly),
@@ -1198,13 +1445,25 @@ export default function App() {
           fetchSheet(TAB_NAMES.inventoryAwd),
           fetchSheet(TAB_NAMES.products30d),
           fetchSheet(TAB_NAMES.salesMonthly),
-          fetchSheet(TAB_NAMES.fbmOnly).catch(() => []),
-          fetchSheet(TAB_NAMES.spCampaigns7).catch(() => []),
-          fetchSheet(TAB_NAMES.sbCampaigns7).catch(() => []),
-          fetchSheet(TAB_NAMES.sdCampaigns7).catch(() => []),
-          fetchSheet(TAB_NAMES.spCampaigns60).catch(() => []),
-          fetchSheet(TAB_NAMES.sbCampaigns60).catch(() => []),
-          fetchSheet(TAB_NAMES.sdCampaigns60).catch(() => []),
+          safe(TAB_NAMES.fbmOnly),
+          safe(TAB_NAMES.spCampaigns7),
+          safe(TAB_NAMES.sbCampaigns7),
+          safe(TAB_NAMES.sdCampaigns7),
+          safe(TAB_NAMES.spCampaigns60),
+          safe(TAB_NAMES.sbCampaigns60),
+          safe(TAB_NAMES.sdCampaigns60),
+          safe(TAB_NAMES.wmt1pCampaigns7),
+          safe(TAB_NAMES.wmt1pCampaigns30),
+          safe(TAB_NAMES.wmt1pCampaigns60),
+          safe(TAB_NAMES.wmt3pCampaigns7),
+          safe(TAB_NAMES.wmt3pCampaigns30),
+          safe(TAB_NAMES.wmt3pCampaigns60),
+          safe(TAB_NAMES.wmtotherCampaigns7),
+          safe(TAB_NAMES.wmtotherCampaigns30),
+          safe(TAB_NAMES.wmtotherCampaigns60),
+          safe(TAB_NAMES.wmt1pSearchTerms),
+          safe(TAB_NAMES.wmt3pSearchTerms),
+          safe(TAB_NAMES.wmtotherSearchTerms),
         ]);
 
         setChannelConfigSheet(chCfg);
@@ -1227,6 +1486,10 @@ export default function App() {
         setSpCampaigns60(spCamp60);
         setSbCampaigns60(sbCamp60);
         setSdCampaigns60(sdCamp60);
+        setWmt1pCampaigns7(w1p7); setWmt1pCampaigns30(w1p30); setWmt1pCampaigns60(w1p60);
+        setWmt3pCampaigns7(w3p7); setWmt3pCampaigns30(w3p30); setWmt3pCampaigns60(w3p60);
+        setWmtotherCampaigns7(woth7); setWmtotherCampaigns30(woth30); setWmtotherCampaigns60(woth60);
+        setWmt1pSearchTermsRaw(w1pSt); setWmt3pSearchTermsRaw(w3pSt); setWmtotherSearchTermsRaw(wothSt);
 
         const months = generateTrailingMonthCodes();
         const settlementResults = await Promise.all(
@@ -1240,6 +1503,19 @@ export default function App() {
           if (rows && rows.length) settlementMap[`amzsc|${ym}`] = rows;
         }
         setSettlementByMonth(settlementMap);
+
+        // Traffic exports — same monthly cadence, header-row auto-detect.
+        const trafficResults = await Promise.all(
+          months.map(async (ym) => ({
+            ym,
+            rows: await fetchSettlementSheet(`${TAB_NAMES.amzscTrafficPrefix}${ym}`),
+          }))
+        );
+        const trafficMap = {};
+        for (const { ym, rows } of trafficResults) {
+          if (rows && rows.length) trafficMap[ym] = rows;
+        }
+        setTrafficByMonth(trafficMap);
 
         setError("");
       } catch (e) {
@@ -1347,26 +1623,76 @@ export default function App() {
   const isFbmOnly = (asin) =>
     fbmOnlyAsins.has(String(asin || "").trim().toUpperCase());
 
-  // Campaign Trends
-  const campaignsByWindow = useMemo(() => {
+  // Walmart parsed campaigns (per account × per window) — used for Campaign Trends
+  // and merged into Search Terms / Targeting when Walmart accounts are in scope.
+  const walmartCampaignsByWindow = useMemo(() => {
+    const inScope = (code) => activeScope.includes(code);
     return {
       "7": [
-        ...parseCampaignBulkSheet(spCampaigns7, "Sponsored Products"),
-        ...parseCampaignBulkSheet(sbCampaigns7, "Sponsored Brands"),
-        ...parseCampaignBulkSheet(sdCampaigns7, "Sponsored Display"),
+        ...(inScope("wmt1p") ? parseWalmartCampaignBulkSheet(wmt1pCampaigns7, "wmt1p") : []),
+        ...(inScope("wmt3p") ? parseWalmartCampaignBulkSheet(wmt3pCampaigns7, "wmt3p") : []),
+        ...(inScope("wmtother") ? parseWalmartCampaignBulkSheet(wmtotherCampaigns7, "wmtother") : []),
       ],
       "30": [
-        ...parseCampaignBulkSheet(spCampaigns, "Sponsored Products"),
-        ...parseCampaignBulkSheet(sbCampaigns, "Sponsored Brands"),
-        ...parseCampaignBulkSheet(sdCampaigns, "Sponsored Display"),
+        ...(inScope("wmt1p") ? parseWalmartCampaignBulkSheet(wmt1pCampaigns30, "wmt1p") : []),
+        ...(inScope("wmt3p") ? parseWalmartCampaignBulkSheet(wmt3pCampaigns30, "wmt3p") : []),
+        ...(inScope("wmtother") ? parseWalmartCampaignBulkSheet(wmtotherCampaigns30, "wmtother") : []),
       ],
       "60": [
-        ...parseCampaignBulkSheet(spCampaigns60, "Sponsored Products"),
-        ...parseCampaignBulkSheet(sbCampaigns60, "Sponsored Brands"),
-        ...parseCampaignBulkSheet(sdCampaigns60, "Sponsored Display"),
+        ...(inScope("wmt1p") ? parseWalmartCampaignBulkSheet(wmt1pCampaigns60, "wmt1p") : []),
+        ...(inScope("wmt3p") ? parseWalmartCampaignBulkSheet(wmt3pCampaigns60, "wmt3p") : []),
+        ...(inScope("wmtother") ? parseWalmartCampaignBulkSheet(wmtotherCampaigns60, "wmtother") : []),
       ],
     };
-  }, [spCampaigns, sbCampaigns, sdCampaigns, spCampaigns7, sbCampaigns7, sdCampaigns7, spCampaigns60, sbCampaigns60, sdCampaigns60]);
+  }, [
+    activeScope,
+    wmt1pCampaigns7, wmt1pCampaigns30, wmt1pCampaigns60,
+    wmt3pCampaigns7, wmt3pCampaigns30, wmt3pCampaigns60,
+    wmtotherCampaigns7, wmtotherCampaigns30, wmtotherCampaigns60,
+  ]);
+
+  const walmartUnifiedSearchTerms = useMemo(() => {
+    const out = [];
+    if (activeScope.includes("wmt1p")) out.push(...parseWalmartSearchTerms(wmt1pSearchTermsRaw, "wmt1p"));
+    if (activeScope.includes("wmt3p")) out.push(...parseWalmartSearchTerms(wmt3pSearchTermsRaw, "wmt3p"));
+    if (activeScope.includes("wmtother")) out.push(...parseWalmartSearchTerms(wmtotherSearchTermsRaw, "wmtother"));
+    return out;
+  }, [activeScope, wmt1pSearchTermsRaw, wmt3pSearchTermsRaw, wmtotherSearchTermsRaw]);
+
+  // Whether Amazon-Seller-Central campaign data is in scope (drives whether
+  // SP/SB/SD bulk sheets get merged into the unified Search Terms / Trends).
+  const includeAmazonAds = useMemo(() => activeScope.includes("amzsc"), [activeScope]);
+
+  // Campaign Trends — merge Amazon (when amzsc in scope) + Walmart (when any wmt account in scope)
+  const campaignsByWindow = useMemo(() => {
+    const amzn = (rows, adType) => (includeAmazonAds ? parseCampaignBulkSheet(rows, adType) : []);
+    return {
+      "7": [
+        ...amzn(spCampaigns7, "Sponsored Products"),
+        ...amzn(sbCampaigns7, "Sponsored Brands"),
+        ...amzn(sdCampaigns7, "Sponsored Display"),
+        ...walmartCampaignsByWindow["7"],
+      ],
+      "30": [
+        ...amzn(spCampaigns, "Sponsored Products"),
+        ...amzn(sbCampaigns, "Sponsored Brands"),
+        ...amzn(sdCampaigns, "Sponsored Display"),
+        ...walmartCampaignsByWindow["30"],
+      ],
+      "60": [
+        ...amzn(spCampaigns60, "Sponsored Products"),
+        ...amzn(sbCampaigns60, "Sponsored Brands"),
+        ...amzn(sdCampaigns60, "Sponsored Display"),
+        ...walmartCampaignsByWindow["60"],
+      ],
+    };
+  }, [
+    includeAmazonAds,
+    spCampaigns, sbCampaigns, sdCampaigns,
+    spCampaigns7, sbCampaigns7, sdCampaigns7,
+    spCampaigns60, sbCampaigns60, sdCampaigns60,
+    walmartCampaignsByWindow,
+  ]);
 
   const campaignTrends = useMemo(() => {
     const map = new Map();
@@ -1561,8 +1887,47 @@ export default function App() {
       cvr: normalizeNumber(pick(row, ["Conversion Rate"], 0)) * 100,
     }));
 
-    return [...sp, ...sb].filter((row) => row.searchTerm);
-  }, [spSearchTerms, sbSearchTerms]);
+    const amazon = includeAmazonAds ? [...sp, ...sb] : [];
+    return [...amazon, ...walmartUnifiedSearchTerms].filter((row) => row.searchTerm);
+  }, [spSearchTerms, sbSearchTerms, includeAmazonAds, walmartUnifiedSearchTerms]);
+
+  // Traffic decomposition input — Map<ASIN, Map<YYYY-MM, {sessions, asp, cvr, oosDays, ...}>>
+  const trafficByAsinByMonth = useMemo(() => {
+    const out = new Map();
+    for (const [ym, rows] of Object.entries(trafficByMonth)) {
+      const parsed = parseTrafficSheet(rows, ym);
+      for (const r of parsed) {
+        const inner = out.get(r.asin) || new Map();
+        // If multiple rows per ASIN per month (parent vs child), sum sessions/units
+        // and recompute ASP / CVR from sums.
+        const cur = inner.get(ym) || {
+          ym, asin: r.asin,
+          sessions: 0, pageViews: 0, unitsOrdered: 0, orderedSales: 0,
+          buyBoxPctSum: 0, buyBoxPctCount: 0, oosDays: 0,
+        };
+        cur.sessions += r.sessions;
+        cur.pageViews += r.pageViews;
+        cur.unitsOrdered += r.unitsOrdered;
+        cur.orderedSales += r.orderedSales;
+        if (r.buyBoxPct > 0) {
+          cur.buyBoxPctSum += r.buyBoxPct;
+          cur.buyBoxPctCount += 1;
+        }
+        cur.oosDays = Math.max(cur.oosDays, r.oosDays);
+        inner.set(ym, cur);
+        out.set(r.asin, inner);
+      }
+    }
+    // Finalize derived metrics per cell
+    for (const inner of out.values()) {
+      for (const cell of inner.values()) {
+        cell.asp = cell.unitsOrdered > 0 ? cell.orderedSales / cell.unitsOrdered : 0;
+        cell.cvr = cell.sessions > 0 ? cell.unitsOrdered / cell.sessions : 0;
+        cell.buyBoxPct = cell.buyBoxPctCount > 0 ? cell.buyBoxPctSum / cell.buyBoxPctCount : 0;
+      }
+    }
+    return out;
+  }, [trafficByMonth]);
 
   const recommendedNegatives = useMemo(() => {
     return unifiedSearchTerms
@@ -1653,80 +2018,117 @@ export default function App() {
               Channel Scope
             </p>
             <div className="space-y-2">
-              {/* Predefined groups */}
-              <button
-                onClick={() => {
-                  const amzscCode = channels.find(c => c.code === "amzsc");
-                  const amzvcCode = channels.find(c => c.code === "amzvc");
-                  const both = [amzscCode, amzvcCode].filter(c => c && c.enabled).map(c => c.code);
-                  if (both.length > 0) setActiveScope(both);
-                }}
-                className={cn(
-                  "block w-full text-left px-3 py-2 rounded-2xl border text-xs transition",
-                  activeScope.length === 2 && activeScope.includes("amzsc") && activeScope.includes("amzvc")
-                    ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
-                    : "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
-                )}
-              >
-                Amazon Combined
-              </button>
-              <button
-                onClick={() => {
-                  const codes = channels.filter(c => ["wmt1p", "wmt3p", "wmtother"].includes(c.code) && c.enabled).map(c => c.code);
-                  if (codes.length > 0) setActiveScope(codes);
-                }}
-                className={cn(
-                  "block w-full text-left px-3 py-2 rounded-2xl border text-xs transition",
-                  activeScope.length >= 2 && activeScope.includes("wmt1p")
-                    ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
-                    : "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
-                )}
-              >
-                Walmart Combined
-              </button>
-              <button
-                onClick={() => {
-                  const codes = channels.filter(c => c.enabled).map(c => c.code);
-                  if (codes.length > 0) setActiveScope(codes);
-                }}
-                className={cn(
-                  "block w-full text-left px-3 py-2 rounded-2xl border text-xs transition",
-                  activeScope.length === channels.filter(c => c.enabled).length
-                    ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
-                    : "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
-                )}
-              >
-                All Channels
-              </button>
-              <select
-                value={JSON.stringify(activeScope)}
-                onChange={(e) => {
-                  try {
-                    setActiveScope(JSON.parse(e.target.value));
-                  } catch {
-                    setActiveScope(["amzsc"]);
-                  }
-                }}
-                className="w-full rounded-2xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
-              >
-                <option value={JSON.stringify(activeScope)}>
-                  {activeScope.length === 1 ? `Single: ${activeScope[0]}` : `Custom (${activeScope.length})`}
-                </option>
-                {channels.filter(c => c.enabled).map((c) => (
-                  <option key={c.code} value={JSON.stringify([c.code])}>
-                    {c.name}
-                  </option>
-                ))}
-                <option value="custom">Custom multi-select...</option>
-              </select>
+              {(() => {
+                const amazonGroup = channels.filter((c) => ["amzsc", "amzvc"].includes(c.code) && c.enabled).map((c) => c.code);
+                const walmartGroup = channels.filter((c) => ["wmt1p", "wmt3p", "wmtother"].includes(c.code) && c.enabled).map((c) => c.code);
+                const allEnabled = enabledChannels.map((c) => c.code);
+                const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+                const isAmazonCombined = amazonGroup.length > 0 && sameSet(activeScope, amazonGroup);
+                const isWalmartCombined = walmartGroup.length > 0 && sameSet(activeScope, walmartGroup);
+                const isAllChannels = allEnabled.length > 0 && sameSet(activeScope, allEnabled);
+                const isSingle = activeScope.length === 1 && !isAmazonCombined && !isWalmartCombined && !isAllChannels;
+                const isCustom = !isAmazonCombined && !isWalmartCombined && !isAllChannels && !isSingle;
+
+                const setSingle = (code) => setActiveScope([code]);
+                const toggleInScope = (code) => {
+                  setActiveScope((prev) => {
+                    const next = prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code];
+                    return next.length === 0 ? [code] : next;
+                  });
+                };
+
+                return (
+                  <>
+                    <button
+                      onClick={() => amazonGroup.length && setActiveScope(amazonGroup)}
+                      disabled={amazonGroup.length === 0}
+                      className={cn(
+                        "block w-full text-left px-3 py-2 rounded-2xl border text-xs transition disabled:opacity-40 disabled:cursor-not-allowed",
+                        isAmazonCombined
+                          ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                          : "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
+                      )}
+                    >
+                      Amazon Combined {amazonGroup.length > 0 && <span className="text-slate-500">({amazonGroup.length})</span>}
+                    </button>
+                    <button
+                      onClick={() => walmartGroup.length && setActiveScope(walmartGroup)}
+                      disabled={walmartGroup.length === 0}
+                      className={cn(
+                        "block w-full text-left px-3 py-2 rounded-2xl border text-xs transition disabled:opacity-40 disabled:cursor-not-allowed",
+                        isWalmartCombined
+                          ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                          : "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
+                      )}
+                    >
+                      Walmart Combined {walmartGroup.length > 0 && <span className="text-slate-500">({walmartGroup.length})</span>}
+                    </button>
+                    <button
+                      onClick={() => allEnabled.length && setActiveScope(allEnabled)}
+                      disabled={allEnabled.length === 0}
+                      className={cn(
+                        "block w-full text-left px-3 py-2 rounded-2xl border text-xs transition disabled:opacity-40 disabled:cursor-not-allowed",
+                        isAllChannels
+                          ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                          : "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
+                      )}
+                    >
+                      All Channels {allEnabled.length > 0 && <span className="text-slate-500">({allEnabled.length})</span>}
+                    </button>
+                    <select
+                      value={isSingle ? activeScope[0] : "__none__"}
+                      onChange={(e) => {
+                        if (e.target.value && e.target.value !== "__none__") setSingle(e.target.value);
+                      }}
+                      className="w-full rounded-2xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white outline-none focus:border-cyan-400"
+                    >
+                      <option value="__none__">Pick a single channel…</option>
+                      {enabledChannels.map((c) => (
+                        <option key={c.code} value={c.code}>{c.name}</option>
+                      ))}
+                    </select>
+                    <details className="rounded-2xl border border-slate-800 bg-slate-950" open={isCustom}>
+                      <summary className="cursor-pointer list-none px-3 py-2 text-xs text-slate-300 hover:bg-slate-900 rounded-2xl">
+                        Custom… {isCustom && <span className="text-cyan-300">({activeScope.length} selected)</span>}
+                      </summary>
+                      <div className="space-y-1 px-3 pb-3 pt-1">
+                        {enabledChannels.length === 0 && (
+                          <p className="text-xs text-slate-500">No enabled channels in <code>channel_config</code>.</p>
+                        )}
+                        {enabledChannels.map((c) => {
+                          const checked = activeScope.includes(c.code);
+                          return (
+                            <label key={c.code} className="flex cursor-pointer items-center gap-2 rounded-xl px-2 py-1 text-xs text-slate-300 hover:bg-slate-900">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleInScope(c.code)}
+                                className="h-3.5 w-3.5 accent-cyan-400"
+                              />
+                              <span className="flex-1 truncate">{c.name}</span>
+                              <span className="font-mono text-[10px] text-slate-500">{c.code}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  </>
+                );
+              })()}
             </div>
           </div>
 
           <div className="mt-5 space-y-1.5">
             {tabs.map((tab) => {
-              // FSN pages visible only when scope includes amzsc
-              const fsn_pages = ["advertising", "campaignTrends", "targeting", "searchTerms", "inventory", "catalog"];
-              const isVisible = !fsn_pages.includes(tab.id) || activeScope.includes("amzsc");
+              // Amazon-only pages (read SP/SB/SD bulk sheets directly).
+              const amzscOnly = ["advertising", "inventory", "catalog"];
+              // Channel-aware pages (Amazon OR any Walmart account).
+              const channelAware = ["campaignTrends", "targeting", "searchTerms"];
+              const hasAmzsc = activeScope.includes("amzsc");
+              const hasWalmart = activeScope.some((c) => ["wmt1p", "wmt3p", "wmtother"].includes(c));
+              let isVisible = true;
+              if (amzscOnly.includes(tab.id)) isVisible = hasAmzsc;
+              else if (channelAware.includes(tab.id)) isVisible = hasAmzsc || hasWalmart;
               if (!isVisible) return null;
               return (
                 <SidebarButton
@@ -1873,6 +2275,7 @@ export default function App() {
               settlementRows={settlementRows}
               cogsMap={cogsMap}
               referenceByAsin={referenceByAsin}
+              trafficByAsinByMonth={trafficByAsinByMonth}
             />
           )}
 
@@ -1883,6 +2286,7 @@ export default function App() {
               inventoryByAsin={inventoryByAsin}
               cogsMap={cogsMap}
               referenceByAsin={referenceByAsin}
+              trafficByAsinByMonth={trafficByAsinByMonth}
             />
           )}
 
@@ -1907,21 +2311,22 @@ export default function App() {
 
           {/* ===================== ADVERTISING (FSN) ===================== */}
           {activeTab === "advertising" && (
-            <AdvertisingPage
-              spCampaigns={spCampaigns}
-              sbCampaigns={sbCampaigns}
-              sdCampaigns={sdCampaigns}
-            />
+            <>
+              <MultiChannelWarning activeScope={activeScope} channels={channels} requiredChannel="amzsc" />
+              <AdvertisingPage
+                spCampaigns={spCampaigns}
+                sbCampaigns={sbCampaigns}
+                sdCampaigns={sdCampaigns}
+              />
+            </>
           )}
 
-          {/* ===================== CAMPAIGN TRENDS (FSN) ===================== */}
+          {/* ===================== CAMPAIGN TRENDS (channel-aware) ===================== */}
           {activeTab === "campaignTrends" && (
-            <CampaignTrendsPage
-              campaignTrends={campaignTrends}
-            />
+            <CampaignTrendsPage campaignTrends={campaignTrends} />
           )}
 
-          {/* ===================== TARGETING (FSN) ===================== */}
+          {/* ===================== TARGETING (channel-aware) ===================== */}
           {activeTab === "targeting" && (
             <TargetingPage
               spCampaigns={spCampaigns}
@@ -1929,7 +2334,7 @@ export default function App() {
             />
           )}
 
-          {/* ===================== SEARCH TERMS (FSN) ===================== */}
+          {/* ===================== SEARCH TERMS (channel-aware) ===================== */}
           {activeTab === "searchTerms" && (
             <SearchTermsPage
               recommendedNegatives={recommendedNegatives}
@@ -1939,20 +2344,26 @@ export default function App() {
 
           {/* ===================== INVENTORY (FSN) ===================== */}
           {activeTab === "inventory" && (
-            <InventoryPage
-              inventoryByAsin={inventoryByAsin}
-            />
+            <>
+              <MultiChannelWarning activeScope={activeScope} channels={channels} requiredChannel="amzsc" />
+              <InventoryPage
+                inventoryByAsin={inventoryByAsin}
+              />
+            </>
           )}
 
           {/* ===================== CATALOG (FSN) ===================== */}
           {activeTab === "catalog" && (
-            <CatalogPage
-              spCampaigns={spCampaigns}
-              sbCampaigns={sbCampaigns}
-              sdCampaigns={sdCampaigns}
-              referenceByAsin={referenceByAsin}
-              isFbmOnly={isFbmOnly}
-            />
+            <>
+              <MultiChannelWarning activeScope={activeScope} channels={channels} requiredChannel="amzsc" />
+              <CatalogPage
+                spCampaigns={spCampaigns}
+                sbCampaigns={sbCampaigns}
+                sdCampaigns={sdCampaigns}
+                referenceByAsin={referenceByAsin}
+                isFbmOnly={isFbmOnly}
+              />
+            </>
           )}
 
           {/* ===================== STUB MODULES ===================== */}
@@ -2879,8 +3290,10 @@ function CatalogPage({ spCampaigns = [], sbCampaigns = [], sdCampaigns = [], ref
 // WHAT CHANGED? PAGE — period-over-period sales/profit decomposition
 // =============================================================================
 
-function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
+function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin, trafficByAsinByMonth }) {
   const [period, setPeriod] = useState("MoM");
+  const hasTraffic = trafficByAsinByMonth && trafficByAsinByMonth.size > 0;
+
   const monthlyByAsin = useMemo(() => {
     const map = new Map();
     for (const r of settlementRows) {
@@ -2914,11 +3327,20 @@ function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
     const out = [];
     const allMonths = new Set();
     for (const inner of monthlyByAsin.values()) for (const m of inner.keys()) allMonths.add(m);
+    if (trafficByAsinByMonth) {
+      for (const inner of trafficByAsinByMonth.values()) for (const m of inner.keys()) allMonths.add(m);
+    }
     const months = Array.from(allMonths).sort();
     if (months.length < 2) return out;
     const cur = months[months.length - 1];
     const prev = months[months.length - 2];
-    for (const [asin, inner] of monthlyByAsin) {
+
+    // Union of ASINs across settlement and traffic
+    const allAsins = new Set(monthlyByAsin.keys());
+    if (trafficByAsinByMonth) for (const a of trafficByAsinByMonth.keys()) allAsins.add(a);
+
+    for (const asin of allAsins) {
+      const inner = monthlyByAsin.get(asin) || new Map();
       const c = inner.get(cur) || { units: 0, sales: 0, refunds: 0, fees: 0 };
       const p = inner.get(prev) || { units: 0, sales: 0, refunds: 0, fees: 0 };
       const dSales = c.sales - p.sales;
@@ -2931,11 +3353,56 @@ function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
       const cmPrev = p.sales - p.refunds - p.fees - cogs * p.units;
       const dCm = cmCur - cmPrev;
       const ref = (referenceByAsin && referenceByAsin.get && referenceByAsin.get(asin)) || {};
+
+      // Traffic-side metrics — sessions, CVR, OOS days deltas if available
+      const tInner = trafficByAsinByMonth ? trafficByAsinByMonth.get(asin) : null;
+      const tc = (tInner && tInner.get(cur)) || null;
+      const tp = (tInner && tInner.get(prev)) || null;
+      const sessionsCur = tc ? tc.sessions : 0;
+      const sessionsPrev = tp ? tp.sessions : 0;
+      const dSessions = sessionsCur - sessionsPrev;
+      const sessionsPctChange = sessionsPrev > 0 ? (dSessions / sessionsPrev) * 100 : 0;
+      const cvrCur = tc ? tc.cvr : 0;
+      const cvrPrev = tp ? tp.cvr : 0;
+      const dCvr = cvrCur - cvrPrev;
+      const oosCur = tc ? tc.oosDays : 0;
+      const oosPrev = tp ? tp.oosDays : 0;
+      const dOos = oosCur - oosPrev;
+
+      // Decompose drivers using traffic when available, settlement-only otherwise.
       let driver = "Mixed";
-      if (dUnits !== 0 || dAsp !== 0) {
-        if (Math.abs(dAsp * Math.max(c.units, 1)) > Math.abs(dUnits * Math.max(aspPrev, 1))) driver = "Price change";
-        else driver = dUnits < 0 ? "Volume drop" : "Volume gain";
+      let attribution;
+      if (tc || tp) {
+        // Compare relative magnitudes of traffic vs CVR vs price contributions.
+        const trafficContribution = Math.abs(dSessions * Math.max(cvrPrev, 0.01) * Math.max(aspPrev, 1));
+        const cvrContribution = Math.abs(dCvr * Math.max(sessionsPrev, 1) * Math.max(aspPrev, 1));
+        const priceContribution = Math.abs(dAsp * Math.max(c.units, 1));
+        const oosContribution = Math.abs(dOos * (Math.max(sessionsPrev, 1) / 30) * Math.max(cvrPrev, 0.01) * Math.max(aspPrev, 1));
+        const max = Math.max(trafficContribution, cvrContribution, priceContribution, oosContribution);
+        if (max === oosContribution && dOos > 0) driver = "Stockout";
+        else if (max === trafficContribution) driver = dSessions < 0 ? "Traffic drop" : "Traffic gain";
+        else if (max === cvrContribution) driver = dCvr < 0 ? "CVR drop" : "CVR lift";
+        else driver = dAsp < 0 ? "Price cut" : "Price increase";
+
+        const sessionsLabel = sessionsPctChange === 0 ? "sessions steady"
+          : `${sessionsPctChange > 0 ? "+" : ""}${sessionsPctChange.toFixed(0)}% sessions`;
+        const cvrLabel = Math.abs(dCvr) < 0.001 ? "CVR steady"
+          : `CVR ${dCvr >= 0 ? "+" : ""}${(dCvr * 100).toFixed(1)}pp`;
+        const stockoutLabel = dOos > 0 ? `, ${dOos}d more OOS` : "";
+
+        attribution = dSales >= 0
+          ? `Up ${currency(dSales)} — ${sessionsLabel}, ${cvrLabel}${stockoutLabel}`
+          : `Down ${currency(Math.abs(dSales))} — ${sessionsLabel}, ${cvrLabel}${stockoutLabel}`;
+      } else {
+        if (dUnits !== 0 || dAsp !== 0) {
+          if (Math.abs(dAsp * Math.max(c.units, 1)) > Math.abs(dUnits * Math.max(aspPrev, 1))) driver = "Price change";
+          else driver = dUnits < 0 ? "Volume drop" : "Volume gain";
+        }
+        attribution = dSales >= 0
+          ? `Up ${currency(dSales)} — ${dUnits >= 0 ? "+" + dUnits : dUnits} units, ASP ${dAsp >= 0 ? "+" : ""}${currency(dAsp)}`
+          : `Down ${currency(Math.abs(dSales))} — ${dUnits} units, ASP ${dAsp >= 0 ? "+" : ""}${currency(dAsp)}`;
       }
+
       out.push({
         asin,
         title: ref.shortTitle || ref.title || "",
@@ -2946,17 +3413,19 @@ function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
         dUnits,
         dAsp,
         dCm,
+        dSessions,
+        dCvr,
+        dOos,
+        sessionsPctChange,
         driver,
-        attribution: dSales >= 0
-          ? `Up ${currency(dSales)} - ${dUnits >= 0 ? "+" + dUnits : dUnits} units, ASP ${dAsp >= 0 ? "+" : ""}${currency(dAsp)}`
-          : `Down ${currency(Math.abs(dSales))} - ${dUnits} units, ASP ${dAsp >= 0 ? "+" : ""}${currency(dAsp)}`,
+        attribution,
         cmAttribution: dCm >= 0
           ? `Up ${currency(dCm)} contribution`
           : `Down ${currency(Math.abs(dCm))} contribution`,
       });
     }
     return out;
-  }, [monthlyByAsin, cogsMap, referenceByAsin]);
+  }, [monthlyByAsin, cogsMap, referenceByAsin, trafficByAsinByMonth]);
 
   if (!settlementRows.length) {
     return (
@@ -3036,7 +3505,7 @@ function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
       </div>
       <SectionCard
         title="All Movers"
-        subtitle={`${movers.length} ASINs with period-over-period change`}
+        subtitle={`${movers.length} ASINs with period-over-period change${hasTraffic ? "" : " (settlement-only — populate amzsc_traffic_<YYYY>_<MM> for full decomposition)"}`}
         right={
           <ExportButton
             filename="what-changed.csv"
@@ -3049,6 +3518,9 @@ function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
               { key: "dSales", label: "Delta Sales" },
               { key: "dUnits", label: "Delta Units" },
               { key: "dAsp", label: "Delta ASP" },
+              { key: "dSessions", label: "Delta Sessions" },
+              { key: "dCvr", label: "Delta CVR", accessor: (r) => Number(((r.dCvr || 0) * 100).toFixed(2)) },
+              { key: "dOos", label: "Delta OOS Days" },
               { key: "dCm", label: "Delta Contribution" },
               { key: "driver", label: "Driver" },
             ]}
@@ -3063,6 +3535,9 @@ function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
                 <th className="px-3 py-2 text-right">Δ Sales</th>
                 <th className="px-3 py-2 text-right">Δ Units</th>
                 <th className="px-3 py-2 text-right">Δ ASP</th>
+                {hasTraffic && <th className="px-3 py-2 text-right">Δ Sessions</th>}
+                {hasTraffic && <th className="px-3 py-2 text-right">Δ CVR</th>}
+                {hasTraffic && <th className="px-3 py-2 text-right">Δ OOS</th>}
                 <th className="px-3 py-2 text-right">Δ Contribution</th>
                 <th className="px-3 py-2 text-right">Driver</th>
               </tr>
@@ -3077,6 +3552,9 @@ function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
                     <td className={cn("px-3 py-2 text-right font-mono", m.dSales >= 0 ? "text-emerald-300" : "text-rose-300")}>{currency(m.dSales)}</td>
                     <td className="px-3 py-2 text-right font-mono text-white">{m.dUnits}</td>
                     <td className="px-3 py-2 text-right font-mono text-white">{currency(m.dAsp)}</td>
+                    {hasTraffic && <td className={cn("px-3 py-2 text-right font-mono", m.dSessions >= 0 ? "text-emerald-300" : "text-rose-300")}>{m.dSessions}</td>}
+                    {hasTraffic && <td className={cn("px-3 py-2 text-right font-mono", m.dCvr >= 0 ? "text-emerald-300" : "text-rose-300")}>{(m.dCvr * 100).toFixed(2)}pp</td>}
+                    {hasTraffic && <td className={cn("px-3 py-2 text-right font-mono", m.dOos <= 0 ? "text-emerald-300" : "text-rose-300")}>{m.dOos}d</td>}
                     <td className={cn("px-3 py-2 text-right font-mono", m.dCm >= 0 ? "text-emerald-300" : "text-rose-300")}>{currency(m.dCm)}</td>
                     <td className="px-3 py-2 text-right text-xs text-slate-300">{m.driver}</td>
                   </tr>
@@ -3093,11 +3571,13 @@ function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
 // ALERTS PAGE — six detection rules, grouped by severity
 // =============================================================================
 
-function AlertsPage({ settlementRows = [], inventoryByAsin = [], cogsMap, referenceByAsin }) {
+function AlertsPage({ settlementRows = [], inventoryByAsin = [], cogsMap, referenceByAsin, trafficByAsinByMonth }) {
   const AD_SPEND_NO_ORDERS = 50;
   const INVENTORY_DAYS = 14;
   const RETURN_RATE_HIGH = 0.15;
   const RETURN_RATE_BASE = 0.08;
+  const CVR_DROP_THRESHOLD = 0.20; // 20% relative drop
+  const hasTraffic = trafficByAsinByMonth && trafficByAsinByMonth.size > 0;
 
   const alerts = useMemo(() => {
     const out = [];
@@ -3159,16 +3639,43 @@ function AlertsPage({ settlementRows = [], inventoryByAsin = [], cogsMap, refere
         });
       }
     }
-    out.push({
-      rule: "CVR drop > 20% WoW",
-      severity: "low",
-      asin: null,
-      title: "Stub - traffic data not yet wired",
-      impact: "Pending amzsc_traffic_<YYYY>_<MM> tabs (need Sessions and Order Item Session %)",
-      action: "Populate traffic export tabs to enable detection",
-      dollarImpact: 0,
-      stub: true,
-    });
+    if (hasTraffic) {
+      // Real CVR-drop rule — month-over-month per ASIN (WoW would need weekly tabs).
+      for (const [asin, inner] of trafficByAsinByMonth) {
+        const months = Array.from(inner.keys()).sort();
+        if (months.length < 2) continue;
+        const c = inner.get(months[months.length - 1]);
+        const p = inner.get(months[months.length - 2]);
+        if (!c || !p) continue;
+        if (p.cvr <= 0 || c.sessions < 100) continue; // need meaningful baseline + traffic
+        const drop = (p.cvr - c.cvr) / p.cvr;
+        if (drop >= CVR_DROP_THRESHOLD) {
+          const ref = (referenceByAsin && referenceByAsin.get && referenceByAsin.get(asin)) || {};
+          const sev = drop >= 0.40 ? "high" : "medium";
+          out.push({
+            rule: "CVR drop",
+            severity: sev,
+            asin,
+            title: ref.shortTitle || ref.title,
+            imageUrl: ref.imageUrl,
+            impact: `CVR fell ${(drop * 100).toFixed(0)}% MoM (${(p.cvr * 100).toFixed(1)}% → ${(c.cvr * 100).toFixed(1)}%, ${c.sessions} sessions)`,
+            action: "Check listing changes, recent reviews, price moves, and competitor activity",
+            dollarImpact: 0,
+          });
+        }
+      }
+    } else {
+      out.push({
+        rule: "CVR drop > 20% MoM",
+        severity: "low",
+        asin: null,
+        title: "Stub - traffic data not yet wired",
+        impact: "Pending amzsc_traffic_<YYYY>_<MM> tabs (need Sessions and Order Item Session %)",
+        action: "Populate traffic export tabs to enable detection",
+        dollarImpact: 0,
+        stub: true,
+      });
+    }
     out.push({
       rule: `Ad spend >= $${AD_SPEND_NO_ORDERS} with zero orders`,
       severity: "low",
@@ -3200,7 +3707,7 @@ function AlertsPage({ settlementRows = [], inventoryByAsin = [], cogsMap, refere
       stub: true,
     });
     return out;
-  }, [settlementRows, inventoryByAsin, referenceByAsin]);
+  }, [settlementRows, inventoryByAsin, referenceByAsin, trafficByAsinByMonth, hasTraffic]);
 
   const high = alerts.filter((a) => a.severity === "high");
   const medium = alerts.filter((a) => a.severity === "medium");
