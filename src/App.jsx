@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  Activity,
+  AlertCircle,
   AlertTriangle,
   BarChart3,
+  Bell,
   Boxes,
   ChevronDown,
   ChevronUp,
@@ -12,6 +15,7 @@ import {
   Globe,
   Megaphone,
   Package,
+  Percent,
   Receipt,
   RefreshCw,
   Rocket,
@@ -21,17 +25,17 @@ import {
   ShoppingBag,
   Tag,
   Tags,
+  Target,
   TrendingUp,
   Wallet,
   Warehouse,
+  Zap,
 } from "lucide-react";
 
 // =============================================================================
 // CONSTANTS
 // =============================================================================
 
-// Sheet ID is overridable via Vercel env var so the same code can serve any
-// client. Fallback below is the Design Headquarters sheet for the default deploy.
 const SHEET_ID =
   (typeof import.meta !== "undefined" && import.meta.env?.VITE_SHEET_ID) ||
   "1qyG6ME0NxHBukxm--Kl3orRcwl3MBHSNWk2wEoPj9dI";
@@ -39,31 +43,37 @@ const SHEET_ID =
 const LOGO_URL = "/logo.png";
 const BRAND_NAME = "Design Headquarters";
 
-// Structural tabs the dashboard expects (none are required — missing tabs just
-// degrade specific modules gracefully).
 const TAB_NAMES = {
   channelConfig: "channel_config",
   cogs: "cogs",
   fixedCostsMonthly: "fixed_costs_monthly",
   itemRef: "item_data_reference",
-  // Ad reports — same naming as the FSN dashboard so existing exports map cleanly.
   spCampaigns: "Sponsored Products Campaigns",
   sbCampaigns: "Sponsored Brands Campaigns",
   sdCampaigns: "Sponsored Display Campaigns",
+  spSearchTerms: "SP Search Term Report",
+  sbSearchTerms: "SB Search Term Report",
+  inventoryFba: "inventory_fba",
+  inventoryAwd: "inventory_awd",
+  products30d: "products_30d",
+  salesMonthly: "sales_monthly",
+  fbmOnly: "FBM_only",
+  spCampaigns7: "Sponsored Products Campaigns_7",
+  sbCampaigns7: "Sponsored Brands Campaigns_7",
+  sdCampaigns7: "Sponsored Display Campaigns_7",
+  spCampaigns60: "Sponsored Products Campaigns_60",
+  sbCampaigns60: "Sponsored Brands Campaigns_60",
+  sdCampaigns60: "Sponsored Display Campaigns_60",
 };
 
-// How far back to look for monthly settlement tabs. Each candidate tab is
-// fetched optimistically — missing ones just return empty.
 const SETTLEMENT_LOOKBACK_MONTHS = 18;
 
-// Channel registry (defaults). The channel_config sheet can override `enabled`
-// and `account_label` for each channel; channels not listed below render in
-// the Settings page as "unknown channel code".
 const DEFAULT_CHANNELS = [
   { code: "amzsc", name: "Amazon Seller Central", enabled: true },
   { code: "amzvc", name: "Amazon Vendor Central", enabled: false },
   { code: "wmt1p", name: "Walmart 1P", enabled: false },
   { code: "wmt3p", name: "Walmart Marketplace", enabled: false },
+  { code: "wmtother", name: "Walmart Other", enabled: false },
   { code: "tgtdsv", name: "Target DSV", enabled: false },
   { code: "tgt3p", name: "Target Marketplace", enabled: false },
   { code: "macys", name: "Macy's Marketplace", enabled: false },
@@ -77,8 +87,81 @@ const DEFAULT_CHANNELS = [
   { code: "shopify", name: "Shopify", enabled: false },
   { code: "tiktok", name: "TikTok Shop", enabled: false },
   { code: "temu", name: "Temu", enabled: false },
-  { code: "whatnot", name: "Whatnot", enabled: false },
 ];
+
+// Campaign Trends categorization thresholds
+const CAMPAIGN_TARGET_ROAS = 3.0;
+const CAMPAIGN_HIDDEN_GEM_ROAS = 4.0;
+const CAMPAIGN_BLEEDING_SPEND = 50;
+const CAMPAIGN_MIN_TREND_SPEND = 5;
+const NEGATIVE_CLICK_THRESHOLD = 12;
+const DAYS_TO_SHIP_TARGET = 60;
+const DAYS_URGENT = 14;
+
+// Alert thresholds
+const ALERT_CVR_DROP_THRESHOLD = 20; // percent
+const ALERT_AD_SPEND_THRESHOLD = 50; // dollars
+const ALERT_INVENTORY_DAYS = 14;
+const ALERT_RETURN_RATE_HIGH = 15; // percent
+const ALERT_RETURN_RATE_NORMAL = 8; // percent
+
+const PNL_LINE_ITEMS = [
+  { id: "section_revenue", section: true, label: "Revenue" },
+  { id: "sales", label: "Sales" },
+  { id: "shipping_promo", label: "Shipping & Promotional Rebates" },
+  { id: "gift_wraps", label: "Gift Wraps" },
+  { id: "refunds", label: "Refunds" },
+  { id: "reimbursements", label: "Reimbursements" },
+  { id: "liquidation", label: "Liquidation" },
+  { id: "net_revenue", label: "Net Revenue", emphasize: true, isTotal: true },
+  { id: "section_cogs", section: true, label: "Cost of Goods" },
+  { id: "cogs", label: "Cost of Goods" },
+  { id: "total_cogs", label: "Total Cost of Goods Sold", emphasize: true, isTotal: true },
+  { id: "section_general", section: true, label: "General Expenses" },
+  { id: "amazon_commissions", label: "Amazon Product Commissions" },
+  { id: "outbound_fba", label: "Outbound Shipping FBA" },
+  { id: "advertising", label: "Amazon Advertising" },
+  { id: "sales_tax_service_fee", label: "Sales Tax Service Fee" },
+  { id: "inbound_shipping_fee", label: "Inbound Shipping Fee" },
+  { id: "awd_fees", label: "AWD Transportation & Storage Fee" },
+  { id: "fba_storage_fees", label: "FBA Storage Fees" },
+  { id: "fba_inventory_fees", label: "FBA Inventory Fees" },
+  { id: "fba_removal_fees", label: "FBA Removal Fees" },
+  { id: "fba_customer_return_fees", label: "FBA Customer Return Fees" },
+  { id: "premium_services_fee", label: "Premium Services Fee" },
+  { id: "subscription_fee", label: "Amazon Subscription Fee" },
+  { id: "vine_enrollment_fee", label: "Amazon Vine Enrollment Fee" },
+  { id: "other_fba_fees", label: "Other FBA Fees" },
+  { id: "total_general", label: "Total General Expenses", emphasize: true, isTotal: true },
+  { id: "section_tax", section: true, label: "Sales Tax" },
+  { id: "sales_tax_collected", label: "Sales Tax Collected" },
+  { id: "marketplace_withheld_tax", label: "Marketplace Withheld Tax" },
+  { id: "net_sales_tax", label: "Net Sales Tax", emphasize: true, isTotal: true },
+  { id: "section_personnel", section: true, label: "Personnel & Other" },
+  { id: "personnel", label: "Personnel Expenses" },
+  { id: "section_bottom", section: true, label: "Bottom Line" },
+  { id: "gross_profit", label: "Gross Profit", emphasize: true, isTotal: true },
+  { id: "gross_margin", label: "Gross Margin", isPct: true },
+  { id: "net_profit", label: "Net Profit", emphasize: true, isTotal: true },
+  { id: "net_margin", label: "Net Margin", isPct: true },
+];
+
+const CAMPAIGN_CATEGORIES = [
+  { id: "all", label: "All Campaigns", tone: "slate", action: "" },
+  { id: "improving", label: "Improving", tone: "emerald", action: "Raise bids 10–20%" },
+  { id: "declining", label: "Declining", tone: "rose", action: "Lower bids 10–20%" },
+  { id: "bleeding", label: "Bleeding", tone: "amber", action: "Pause or add negatives" },
+  { id: "hidden_gem", label: "Hidden Gem", tone: "cyan", action: "Raise daily budget" },
+  { id: "monitor", label: "Monitor", tone: "slate", action: "No action — keep watching" },
+];
+
+const CATEGORY_TONE_CLASSES = {
+  slate: "border-slate-700 bg-slate-900 text-slate-300",
+  emerald: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+  rose: "border-rose-500/40 bg-rose-500/10 text-rose-300",
+  amber: "border-amber-500/40 bg-amber-500/10 text-amber-300",
+  cyan: "border-cyan-500/40 bg-cyan-500/10 text-cyan-300",
+};
 
 // =============================================================================
 // SHEET HELPERS
@@ -115,6 +198,56 @@ async function fetchSheet(tabName) {
   }
 }
 
+async function fetchSettlementSheet(tabName) {
+  const HEADER_HINTS = [
+    "date/time",
+    "settlement id",
+    "product sales",
+    "selling fees",
+    "fba fees",
+    "order id",
+  ];
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?sheet=${encodeURIComponent(
+    tabName
+  )}&headers=0&tq=${encodeURIComponent("select *")}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const text = await res.text();
+    const start = text.indexOf("(");
+    const end = text.lastIndexOf(")");
+    const json = JSON.parse(text.slice(start + 1, end));
+    const allRows = (json.table?.rows || []).map(
+      (r) => (r.c || []).map((cell) => (cell ? cell.v : null))
+    );
+    if (allRows.length === 0) return [];
+
+    let headerIdx = -1;
+    for (let i = 0; i < Math.min(20, allRows.length); i++) {
+      const cells = (allRows[i] || []).map((v) => String(v ?? "").toLowerCase().trim());
+      const matches = HEADER_HINTS.filter((hint) => cells.some((c) => c === hint || c.includes(hint))).length;
+      if (matches >= 2) {
+        headerIdx = i;
+        break;
+      }
+    }
+    if (headerIdx === -1) {
+      return parseGviz(text);
+    }
+
+    const headers = (allRows[headerIdx] || []).map((v) => String(v ?? "").trim());
+    return allRows.slice(headerIdx + 1).map((row) => {
+      const obj = {};
+      headers.forEach((h, i) => {
+        if (h) obj[h] = row[i] ?? null;
+      });
+      return obj;
+    });
+  } catch {
+    return [];
+  }
+}
+
 // =============================================================================
 // SMALL HELPERS
 // =============================================================================
@@ -126,7 +259,6 @@ function cn(...classes) {
 function pick(obj, keys, fallback = null) {
   for (const key of keys) {
     if (obj[key] !== undefined && obj[key] !== null && obj[key] !== "") return obj[key];
-    // case-insensitive fallback — helpful when sheet headers vary in case
     for (const k of Object.keys(obj)) {
       if (k.toLowerCase() === key.toLowerCase() && obj[k] !== null && obj[k] !== "") {
         return obj[k];
@@ -141,6 +273,9 @@ function normalizeNumber(value) {
   if (typeof value === "number") return value;
   return Number(String(value).replace(/[$,%\s,]/g, "")) || 0;
 }
+
+// Short alias used by ported FSN modules / new pages.
+const num = normalizeNumber;
 
 function normalizeText(value) {
   if (value === null || value === undefined) return "";
@@ -225,7 +360,6 @@ function ymToShort(ym) {
   return date.toLocaleDateString("en-US", { month: "short", year: "2-digit" });
 }
 
-// Generate the trailing N month codes ending at "now", e.g. ["2026_05","2026_04",...]
 function generateTrailingMonthCodes(monthsBack = SETTLEMENT_LOOKBACK_MONTHS) {
   const out = [];
   const now = new Date();
@@ -237,15 +371,10 @@ function generateTrailingMonthCodes(monthsBack = SETTLEMENT_LOOKBACK_MONTHS) {
 }
 
 // =============================================================================
-// SETTLEMENT PARSER
+// SETTLEMENT & PARSERS
 // =============================================================================
-// Amazon settlement files (V2 flat-file export) are at the transaction level.
-// Each row is one of: Order, Refund, Adjustment, Order_Retrocharge, Service Fee.
-// We flatten those into normalized "P&L line items" using description matching
-// for the Adjustment rows.
 
 const FEE_RULES = [
-  // [match against description (lowercase), category]
   [/\bsubscription\b/, "subscription_fee"],
   [/long.term storage/, "fba_storage_fees"],
   [/\bstorage fee\b/, "fba_storage_fees"],
@@ -271,8 +400,6 @@ function categorizeAdjustment(description) {
   return "other_fba_fees";
 }
 
-// Parse one settlement tab into a list of normalized rows. Each row carries the
-// year_month from the tab name so all downstream filtering works by period.
 function parseSettlementSheet(rows, ym) {
   if (!Array.isArray(rows) || rows.length === 0) return [];
   return rows.map((r) => {
@@ -281,26 +408,14 @@ function parseSettlementSheet(rows, ym) {
     const sku = normalizeText(pick(r, ["sku", "SKU"], ""));
     const quantity = normalizeNumber(pick(r, ["quantity", "Quantity"], 0));
     const productSales = normalizeNumber(pick(r, ["product sales", "Product Sales"], 0));
-    const productSalesTax = normalizeNumber(
-      pick(r, ["product sales tax", "Product Sales Tax"], 0)
-    );
-    const shippingCredits = normalizeNumber(
-      pick(r, ["shipping credits", "Shipping Credits"], 0)
-    );
-    const giftWrapCredits = normalizeNumber(
-      pick(r, ["gift wrap credits", "Gift Wrap Credits"], 0)
-    );
-    const promoRebates = normalizeNumber(
-      pick(r, ["promotional rebates", "Promotional Rebates"], 0)
-    );
-    const marketplaceWithheld = normalizeNumber(
-      pick(r, ["marketplace withheld tax", "Marketplace Withheld Tax"], 0)
-    );
+    const productSalesTax = normalizeNumber(pick(r, ["product sales tax", "Product Sales Tax"], 0));
+    const shippingCredits = normalizeNumber(pick(r, ["shipping credits", "Shipping Credits"], 0));
+    const giftWrapCredits = normalizeNumber(pick(r, ["gift wrap credits", "Gift Wrap Credits"], 0));
+    const promoRebates = normalizeNumber(pick(r, ["promotional rebates", "Promotional Rebates"], 0));
+    const marketplaceWithheld = normalizeNumber(pick(r, ["marketplace withheld tax", "Marketplace Withheld Tax"], 0));
     const sellingFees = normalizeNumber(pick(r, ["selling fees", "Selling Fees"], 0));
     const fbaFees = normalizeNumber(pick(r, ["fba fees", "FBA Fees"], 0));
-    const otherTransactionFees = normalizeNumber(
-      pick(r, ["other transaction fees", "Other Transaction Fees"], 0)
-    );
+    const otherTransactionFees = normalizeNumber(pick(r, ["other transaction fees", "Other Transaction Fees"], 0));
     const other = normalizeNumber(pick(r, ["other", "Other"], 0));
     const total = normalizeNumber(pick(r, ["total", "Total"], 0));
     const reportedUnitCost = normalizeNumber(pick(r, ["Unit Cost", "unit cost"], 0));
@@ -327,14 +442,7 @@ function parseSettlementSheet(rows, ym) {
   });
 }
 
-// =============================================================================
-// COGS / FIXED COSTS / CHANNEL CONFIG PARSERS
-// =============================================================================
-
 function parseCogs(rows) {
-  // Expected columns: sku, asin, title, unit_cost_landed, effective_date, notes
-  // Also tolerates the format from the Hydrapeak sample: SKU, ASIN, TITLE,
-  // PRODUCT COST (+ SHIPPING COST), DATE START, MARKETPLACE, SELLER.
   const map = new Map();
   for (const r of rows || []) {
     const sku = normalizeText(pick(r, ["sku", "SKU", "Sku"]));
@@ -345,11 +453,8 @@ function parseCogs(rows) {
       normalizeNumber(pick(r, ["unit_cost_landed", "landed_cost", "Landed Cost"], 0)) ||
       normalizeNumber(pick(r, ["PRODUCT COST", "product cost"], 0)) +
         normalizeNumber(pick(r, ["SHIPPING COST", "shipping cost"], 0));
-    const effectiveDate = normalizeText(
-      pick(r, ["effective_date", "Effective Date", "DATE START"], "")
-    );
+    const effectiveDate = normalizeText(pick(r, ["effective_date", "Effective Date", "DATE START"], ""));
     const existing = map.get(sku);
-    // Pick most recent effective_date if duplicates exist.
     if (!existing || (effectiveDate && effectiveDate > (existing.effectiveDate || ""))) {
       map.set(sku, { sku, asin, title, cost, effectiveDate });
     }
@@ -358,7 +463,6 @@ function parseCogs(rows) {
 }
 
 function parseFixedCostsMonthly(rows) {
-  // Expected columns: month (YYYY-MM or YYYY_MM), channel, category, amount, notes
   return (rows || []).map((r) => {
     let month = normalizeText(pick(r, ["month", "Month", "ym", "YM"], ""));
     month = month.replace("-", "_");
@@ -373,15 +477,12 @@ function parseFixedCostsMonthly(rows) {
 }
 
 function parseChannelConfig(rows) {
-  // Build registry from defaults, then apply overrides from the sheet.
   const map = new Map();
   for (const c of DEFAULT_CHANNELS) {
     map.set(c.code, { ...c, accountLabel: "", currency: "USD" });
   }
   for (const r of rows || []) {
-    const code = normalizeText(
-      pick(r, ["channel_code", "code", "Channel Code"])
-    ).toLowerCase();
+    const code = normalizeText(pick(r, ["channel_code", "code", "Channel Code"])).toLowerCase();
     if (!code) continue;
     const enabledRaw = normalizeText(pick(r, ["enabled", "Enabled"], "")).toLowerCase();
     const enabled = enabledRaw === "true" || enabledRaw === "yes" || enabledRaw === "1";
@@ -396,14 +497,6 @@ function parseChannelConfig(rows) {
   }
   return [...map.values()];
 }
-
-// =============================================================================
-// AD SPEND PARSER (campaign-level, sums by month)
-// =============================================================================
-// Bulk operations exports don't include a date column at the row level, so for
-// now we treat the existing Sponsored Products / Brands / Display campaign
-// reports as "current month" ad spend. When monthly ad reports become available
-// we'll switch to month-stamped tabs (e.g., amzsc_ads_2026_02).
 
 function sumAdSpendFromCampaigns(spRows, sbRows, sdRows) {
   let total = 0;
@@ -420,50 +513,6 @@ function sumAdSpendFromCampaigns(spRows, sbRows, sdRows) {
 // =============================================================================
 // P&L COMPUTATION
 // =============================================================================
-// Given parsed settlement rows, COGS map, fixed costs, and ad spend, compute a
-// rolled-up P&L matching the line-item structure the team already produces in
-// Excel. Result is one object per period covered.
-
-const PNL_LINE_ITEMS = [
-  { id: "section_revenue", section: true, label: "Revenue" },
-  { id: "sales", label: "Sales" },
-  { id: "shipping_promo", label: "Shipping & Promotional Rebates" },
-  { id: "gift_wraps", label: "Gift Wraps" },
-  { id: "refunds", label: "Refunds" },
-  { id: "reimbursements", label: "Reimbursements" },
-  { id: "liquidation", label: "Liquidation" },
-  { id: "net_revenue", label: "Net Revenue", emphasize: true, isTotal: true },
-  { id: "section_cogs", section: true, label: "Cost of Goods" },
-  { id: "cogs", label: "Cost of Goods" },
-  { id: "total_cogs", label: "Total Cost of Goods Sold", emphasize: true, isTotal: true },
-  { id: "section_general", section: true, label: "General Expenses" },
-  { id: "amazon_commissions", label: "Amazon Product Commissions" },
-  { id: "outbound_fba", label: "Outbound Shipping FBA" },
-  { id: "advertising", label: "Amazon Advertising" },
-  { id: "sales_tax_service_fee", label: "Sales Tax Service Fee" },
-  { id: "inbound_shipping_fee", label: "Inbound Shipping Fee" },
-  { id: "awd_fees", label: "AWD Transportation & Storage Fee" },
-  { id: "fba_storage_fees", label: "FBA Storage Fees" },
-  { id: "fba_inventory_fees", label: "FBA Inventory Fees" },
-  { id: "fba_removal_fees", label: "FBA Removal Fees" },
-  { id: "fba_customer_return_fees", label: "FBA Customer Return Fees" },
-  { id: "premium_services_fee", label: "Premium Services Fee" },
-  { id: "subscription_fee", label: "Amazon Subscription Fee" },
-  { id: "vine_enrollment_fee", label: "Amazon Vine Enrollment Fee" },
-  { id: "other_fba_fees", label: "Other FBA Fees" },
-  { id: "total_general", label: "Total General Expenses", emphasize: true, isTotal: true },
-  { id: "section_tax", section: true, label: "Sales Tax" },
-  { id: "sales_tax_collected", label: "Sales Tax Collected" },
-  { id: "marketplace_withheld_tax", label: "Marketplace Withheld Tax" },
-  { id: "net_sales_tax", label: "Net Sales Tax", emphasize: true, isTotal: true },
-  { id: "section_personnel", section: true, label: "Personnel & Other" },
-  { id: "personnel", label: "Personnel Expenses" },
-  { id: "section_bottom", section: true, label: "Bottom Line" },
-  { id: "gross_profit", label: "Gross Profit", emphasize: true, isTotal: true },
-  { id: "gross_margin", label: "Gross Margin", isPct: true },
-  { id: "net_profit", label: "Net Profit", emphasize: true, isTotal: true },
-  { id: "net_margin", label: "Net Margin", isPct: true },
-];
 
 function emptyPnL() {
   const o = {};
@@ -485,17 +534,15 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
       p.outbound_fba += r.fbaFees;
       p.sales_tax_collected += r.productSalesTax;
       p.marketplace_withheld_tax += r.marketplaceWithheld;
-      // COGS — prefer landed cost from the cogs sheet, fall back to settlement Unit Cost.
       const cogsEntry = cogsMap.get(r.sku);
       const unitCost = cogsEntry ? cogsEntry.cost : r.reportedUnitCost;
       p.cogs += -1 * Math.abs(unitCost) * Math.abs(r.quantity);
     } else if (r.type === "refund") {
-      p.refunds += r.productSales; // already negative in the file
+      p.refunds += r.productSales;
       p.amazon_commissions += r.sellingFees;
       p.outbound_fba += r.fbaFees;
       p.sales_tax_collected += r.productSalesTax;
       p.marketplace_withheld_tax += r.marketplaceWithheld;
-      // Refunded items: COGS reverses (we got the unit back, in theory)
       const cogsEntry = cogsMap.get(r.sku);
       const unitCost = cogsEntry ? cogsEntry.cost : r.reportedUnitCost;
       p.cogs += Math.abs(unitCost) * Math.abs(r.quantity);
@@ -507,31 +554,23 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
         p.other_fba_fees += r.total;
       }
     } else if (r.type === "service fee" || r.type === "service_fee") {
-      // Catch-all for monthly storage / subscription rows that arrive as
-      // "Service Fee" rather than "Adjustment" in some accounts.
       const cat = categorizeAdjustment(r.description);
       if (p[cat] !== undefined) p[cat] += r.total;
       else p.other_fba_fees += r.total;
     } else if (r.type === "order_retrocharge") {
-      // Retrocharges show as small adjustments — keep them in commissions.
       p.amazon_commissions += r.sellingFees;
       p.sales_tax_collected += r.productSalesTax;
     }
   }
 
-  // Personnel / other monthly costs from the fixed_costs_monthly sheet.
   for (const fc of fixedCostsRows || []) {
     if (fc.ym !== ym) continue;
     p.personnel += -1 * Math.abs(fc.amount);
   }
 
-  // Advertising — for now applied as a single trailing-month total. We split
-  // when month-stamped ad reports are available.
   p.advertising += -1 * Math.abs(adSpendForPeriod || 0);
 
-  // Totals
-  p.net_revenue =
-    p.sales + p.shipping_promo + p.gift_wraps + p.refunds + p.reimbursements + p.liquidation;
+  p.net_revenue = p.sales + p.shipping_promo + p.gift_wraps + p.refunds + p.reimbursements + p.liquidation;
   p.total_cogs = p.cogs;
   p.total_general =
     p.amazon_commissions +
@@ -556,7 +595,6 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
   return p;
 }
 
-// Compute a P&L per ASIN/SKU for the period — drives the "P&L by Item" table.
 function computePnLByAsin(settlementRows, cogsMap, ym) {
   const map = new Map();
   for (const r of settlementRows) {
@@ -606,7 +644,7 @@ function computePnLByAsin(settlementRows, cogsMap, ym) {
 }
 
 // =============================================================================
-// SORT HOOK + REUSABLE TABLE
+// SORT HOOK + TABLE
 // =============================================================================
 
 function useSortableRows(rows, defaultConfig) {
@@ -868,13 +906,252 @@ function EmptyStateCard({ title, body, requiredSheets, icon: Icon = FileText }) 
 }
 
 // =============================================================================
-// APP
+// FSN HELPERS (from App-dc61debf.jsx)
+// =============================================================================
+
+function compactNumber(value) {
+  const n = Number(value || 0);
+  if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(n) >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return `${Math.round(n)}`;
+}
+
+function daysLabel(days) {
+  if (!Number.isFinite(days)) return "—";
+  if (days >= 365) return `${(days / 365).toFixed(1)}y`;
+  if (days >= 30) return `${(days / 30).toFixed(1)}mo`;
+  return `${Math.round(days)}d`;
+}
+
+function extractAsin(text) {
+  const normalized = normalizeText(text).toUpperCase();
+  const match = normalized.match(/([A-Z0-9]{10})/);
+  return match ? match[1] : "";
+}
+
+function extractAsins(text) {
+  const normalized = normalizeText(text).toUpperCase();
+  const matches = normalized.match(/[A-Z0-9]{10}/g);
+  return matches ? Array.from(new Set(matches)) : [];
+}
+
+function inferImageUrl(row) {
+  const explicit = normalizeText(
+    pick(row, ["image url", "Image URL", "image_url", "Image Url"], "")
+  );
+  if (explicit) return explicit;
+  const asin = normalizeText(pick(row, ["asin", "ASIN"], ""));
+  return asin
+    ? `https://images-na.ssl-images-amazon.com/images/P/${asin}.01._SL120_.jpg`
+    : "";
+}
+
+function AsinImage({ src, title }) {
+  const [errored, setErrored] = useState(false);
+
+  if (!src || errored) {
+    return (
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-slate-800 bg-slate-900 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">
+        N/A
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={title || "Product"}
+      className="h-10 w-10 shrink-0 rounded-2xl border border-slate-800 bg-white object-contain p-1"
+      onError={() => setErrored(true)}
+      loading="lazy"
+    />
+  );
+}
+
+function percentChange(current, prior) {
+  const c = normalizeNumber(current);
+  const p = normalizeNumber(prior);
+  if (p === 0) return null;
+  return ((c - p) / p) * 100;
+}
+
+function parseCampaignBulkSheet(sheet, adType) {
+  if (!Array.isArray(sheet)) return [];
+  return sheet
+    .filter((row) => normalizeText(pick(row, ["Entity", "entity"])).toLowerCase() === "campaign")
+    .map((row) => {
+      const spend = normalizeNumber(pick(row, ["Spend", "Spend(USD)", "Cost"]));
+      const sales = normalizeNumber(
+        pick(row, [
+          "Sales",
+          "Sales(USD)",
+          "Attributed Sales",
+          "Sales 7 Day Total Sales",
+          "14 Day Total Sales",
+          "Sales 14 Day Total Sales",
+        ])
+      );
+      const clicks = normalizeNumber(pick(row, ["Clicks"]));
+      const impressions = normalizeNumber(pick(row, ["Impressions"]));
+      const orders = normalizeNumber(pick(row, ["Orders", "Orders (#)"]));
+      return {
+        adType,
+        campaignName: normalizeText(pick(row, ["Campaign Name", "Campaign"])),
+        state: normalizeText(pick(row, ["State", "Status"], "—")),
+        impressions,
+        clicks,
+        spend,
+        sales,
+        orders,
+        ctr: impressions ? (clicks / impressions) * 100 : 0,
+        acos: sales ? (spend / sales) * 100 : 0,
+        roas: spend ? sales / spend : 0,
+      };
+    });
+}
+
+function categorizeCampaign(trend) {
+  const w7 = trend.windows["7"];
+  const w30 = trend.windows["30"];
+  const w60 = trend.windows["60"];
+
+  if (!w30 || (w30.spend === 0 && w30.impressions === 0)) return "monitor";
+
+  if (w30.spend >= CAMPAIGN_BLEEDING_SPEND && w30.orders === 0) {
+    return "bleeding";
+  }
+
+  const haveAll =
+    w7 && w60 &&
+    w7.spend >= CAMPAIGN_MIN_TREND_SPEND &&
+    w30.spend >= CAMPAIGN_MIN_TREND_SPEND &&
+    w60.spend >= CAMPAIGN_MIN_TREND_SPEND;
+
+  if (haveAll) {
+    if (w7.roas > w30.roas && w30.roas > w60.roas && w7.roas >= CAMPAIGN_TARGET_ROAS) {
+      return "improving";
+    }
+    if (w7.roas < w30.roas && w30.roas < w60.roas && w7.roas < CAMPAIGN_TARGET_ROAS) {
+      return "declining";
+    }
+  }
+
+  if (w30.roas >= CAMPAIGN_HIDDEN_GEM_ROAS && w30.spend < 200) {
+    const supporting =
+      (w60 && w60.spend >= CAMPAIGN_MIN_TREND_SPEND && w60.roas >= CAMPAIGN_TARGET_ROAS) ||
+      (w7 && w7.spend >= CAMPAIGN_MIN_TREND_SPEND && w7.roas >= CAMPAIGN_TARGET_ROAS);
+    if (supporting) return "hidden_gem";
+  }
+
+  return "monitor";
+}
+
+function parseInventoryRows(rows, referenceByAsin, channel) {
+  return rows
+    .map((row) => {
+      const asin = normalizeText(
+        pick(row, ["asin", "ASIN", "fnsku", "FNSKU", "msku", "MSKU"], "")
+      ).toUpperCase();
+
+      const ref = referenceByAsin.get(asin) || {};
+
+      let units = 0;
+      if (channel === "fba") {
+        units = normalizeNumber(pick(row, ["afn-total-quantity", "AFN Total Quantity"], 0));
+      } else if (channel === "awd") {
+        const available = normalizeNumber(
+          pick(row, ["Available in AWD (units)", "available in awd (units)"], 0)
+        );
+        const inbound = normalizeNumber(
+          pick(row, ["Inbound to AWD (units)", "inbound to awd (units)"], 0)
+        );
+        units = available + inbound;
+      }
+
+      return {
+        asin,
+        shortTitle:
+          ref.shortTitle ||
+          asin ||
+          normalizeText(pick(row, ["product-name", "Product Name", "title", "Title"], "Unknown")),
+        brand: ref.brand || "",
+        parentAsin: ref.parentAsin || "",
+        itemType: ref.type || "",
+        imageUrl:
+          ref.imageUrl ||
+          (asin ? `https://images-na.ssl-images-amazon.com/images/P/${asin}.01._SL120_.jpg` : ""),
+        units,
+      };
+    })
+    .filter((row) => row.asin || row.units > 0);
+}
+
+function CategoryPill({ categoryId }) {
+  const cat = CAMPAIGN_CATEGORIES.find((c) => c.id === categoryId) || CAMPAIGN_CATEGORIES[5];
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
+        CATEGORY_TONE_CLASSES[cat.tone] || CATEGORY_TONE_CLASSES.slate
+      )}
+    >
+      {cat.label}
+    </span>
+  );
+}
+
+function urgencyPill(days) {
+  if (!Number.isFinite(days)) {
+    return (
+      <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300">
+        No sales
+      </span>
+    );
+  }
+  if (days < DAYS_URGENT) {
+    return (
+      <span className="rounded-full border border-rose-900 bg-rose-500/10 px-2.5 py-1 text-xs text-rose-300">
+        Urgent
+      </span>
+    );
+  }
+  if (days < DAYS_TO_SHIP_TARGET) {
+    return (
+      <span className="rounded-full border border-amber-900 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-300">
+        Replenish
+      </span>
+    );
+  }
+  return (
+    <span className="rounded-full border border-emerald-900 bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-300">
+      Healthy
+    </span>
+  );
+}
+
+function recommendationPill(row) {
+  if (row.alreadyBlocked) {
+    return (
+      <span className="rounded-full border border-cyan-900 bg-cyan-500/10 px-2.5 py-1 text-xs text-cyan-300">
+        Already blocked elsewhere
+      </span>
+    );
+  }
+  return (
+    <span className="rounded-full border border-amber-900 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-300">
+      Add negative
+    </span>
+  );
+}
+
+// =============================================================================
+// APP STATE & MAIN
 // =============================================================================
 
 export default function App() {
   const [activeTab, setActiveTab] = useState("overview");
-  const [activeChannel, setActiveChannel] = useState("amzsc");
-  const [pnlPeriod, setPnlPeriod] = useState(""); // e.g. "2026_02"
+  const [activeScope, setActiveScope] = useState(["amzsc"]); // array of channel codes
+  const [pnlPeriod, setPnlPeriod] = useState("");
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -887,7 +1164,19 @@ export default function App() {
   const [spCampaigns, setSpCampaigns] = useState([]);
   const [sbCampaigns, setSbCampaigns] = useState([]);
   const [sdCampaigns, setSdCampaigns] = useState([]);
-  // Map of `${channel}|${ym}` -> raw sheet rows
+  const [spSearchTerms, setSpSearchTerms] = useState([]);
+  const [sbSearchTerms, setSbSearchTerms] = useState([]);
+  const [inventoryFba, setInventoryFba] = useState([]);
+  const [inventoryAwd, setInventoryAwd] = useState([]);
+  const [products30d, setProducts30d] = useState([]);
+  const [salesMonthly, setSalesMonthly] = useState([]);
+  const [fbmOnly, setFbmOnly] = useState([]);
+  const [spCampaigns7, setSpCampaigns7] = useState([]);
+  const [sbCampaigns7, setSbCampaigns7] = useState([]);
+  const [sdCampaigns7, setSdCampaigns7] = useState([]);
+  const [spCampaigns60, setSpCampaigns60] = useState([]);
+  const [sbCampaigns60, setSbCampaigns60] = useState([]);
+  const [sdCampaigns60, setSdCampaigns60] = useState([]);
   const [settlementByMonth, setSettlementByMonth] = useState({});
 
   useEffect(() => {
@@ -895,8 +1184,7 @@ export default function App() {
       try {
         setLoading(true);
 
-        // Static structural tabs first.
-        const [chCfg, cogs, fixed, itemRef, spCamp, sbCamp, sdCamp] = await Promise.all([
+        const [chCfg, cogs, fixed, itemRef, spCamp, sbCamp, sdCamp, spTerms, sbTerms, invFba, invAwd, prod30d, saleMon, fbmOnlySheet, spCamp7, sbCamp7, sdCamp7, spCamp60, sbCamp60, sdCamp60] = await Promise.all([
           fetchSheet(TAB_NAMES.channelConfig),
           fetchSheet(TAB_NAMES.cogs),
           fetchSheet(TAB_NAMES.fixedCostsMonthly),
@@ -904,6 +1192,19 @@ export default function App() {
           fetchSheet(TAB_NAMES.spCampaigns),
           fetchSheet(TAB_NAMES.sbCampaigns),
           fetchSheet(TAB_NAMES.sdCampaigns),
+          fetchSheet(TAB_NAMES.spSearchTerms),
+          fetchSheet(TAB_NAMES.sbSearchTerms),
+          fetchSheet(TAB_NAMES.inventoryFba),
+          fetchSheet(TAB_NAMES.inventoryAwd),
+          fetchSheet(TAB_NAMES.products30d),
+          fetchSheet(TAB_NAMES.salesMonthly),
+          fetchSheet(TAB_NAMES.fbmOnly).catch(() => []),
+          fetchSheet(TAB_NAMES.spCampaigns7).catch(() => []),
+          fetchSheet(TAB_NAMES.sbCampaigns7).catch(() => []),
+          fetchSheet(TAB_NAMES.sdCampaigns7).catch(() => []),
+          fetchSheet(TAB_NAMES.spCampaigns60).catch(() => []),
+          fetchSheet(TAB_NAMES.sbCampaigns60).catch(() => []),
+          fetchSheet(TAB_NAMES.sdCampaigns60).catch(() => []),
         ]);
 
         setChannelConfigSheet(chCfg);
@@ -913,14 +1214,25 @@ export default function App() {
         setSpCampaigns(spCamp);
         setSbCampaigns(sbCamp);
         setSdCampaigns(sdCamp);
+        setSpSearchTerms(spTerms);
+        setSbSearchTerms(sbTerms);
+        setInventoryFba(invFba);
+        setInventoryAwd(invAwd);
+        setProducts30d(prod30d);
+        setSalesMonthly(saleMon);
+        setFbmOnly(fbmOnlySheet);
+        setSpCampaigns7(spCamp7);
+        setSbCampaigns7(sbCamp7);
+        setSdCampaigns7(sdCamp7);
+        setSpCampaigns60(spCamp60);
+        setSbCampaigns60(sbCamp60);
+        setSdCampaigns60(sdCamp60);
 
-        // Discover settlement tabs by trying the trailing N month codes.
-        // Currently scoped to amzsc; future channels follow the same pattern.
         const months = generateTrailingMonthCodes();
         const settlementResults = await Promise.all(
           months.map(async (ym) => ({
             ym,
-            rows: await fetchSheet(`amzsc_settlement_${ym}`),
+            rows: await fetchSettlementSheet(`amzsc_settlement_${ym}`),
           }))
         );
         const settlementMap = {};
@@ -941,11 +1253,9 @@ export default function App() {
     load();
   }, []);
 
-  // Channel registry — defaults overridden by sheet rows.
   const channels = useMemo(() => parseChannelConfig(channelConfigSheet), [channelConfigSheet]);
   const enabledChannels = useMemo(() => channels.filter((c) => c.enabled), [channels]);
 
-  // Months that actually have data, per channel.
   const loadedMonthsByChannel = useMemo(() => {
     const out = {};
     for (const key of Object.keys(settlementByMonth)) {
@@ -954,27 +1264,25 @@ export default function App() {
       out[channel].push(ym);
     }
     for (const ch of Object.keys(out)) {
-      out[ch].sort().reverse(); // newest first
+      out[ch].sort().reverse();
     }
     return out;
   }, [settlementByMonth]);
 
-  // Auto-pick the latest month for the selected channel as the default period.
   useEffect(() => {
-    const months = loadedMonthsByChannel[activeChannel] || [];
+    const months = loadedMonthsByChannel[activeScope[0]] || [];
     if (!pnlPeriod && months.length) setPnlPeriod(months[0]);
-  }, [loadedMonthsByChannel, activeChannel, pnlPeriod]);
+  }, [loadedMonthsByChannel, activeScope, pnlPeriod]);
 
-  // Parse settlement rows for the selected channel only.
   const settlementRows = useMemo(() => {
     const out = [];
     for (const [key, rows] of Object.entries(settlementByMonth)) {
       const [channel, ym] = key.split("|");
-      if (channel !== activeChannel) continue;
+      if (channel !== activeScope[0]) continue;
       out.push(...parseSettlementSheet(rows, ym));
     }
     return out;
-  }, [settlementByMonth, activeChannel]);
+  }, [settlementByMonth, activeScope]);
 
   const cogsMap = useMemo(() => parseCogs(cogsSheet), [cogsSheet]);
   const fixedCosts = useMemo(() => parseFixedCostsMonthly(fixedCostsSheet), [fixedCostsSheet]);
@@ -986,13 +1294,7 @@ export default function App() {
 
   const pnl = useMemo(() => {
     if (!pnlPeriod) return emptyPnL();
-    return computePnLForPeriod(
-      settlementRows,
-      cogsMap,
-      fixedCosts,
-      adSpendCurrentMonth,
-      pnlPeriod
-    );
+    return computePnLForPeriod(settlementRows, cogsMap, fixedCosts, adSpendCurrentMonth, pnlPeriod);
   }, [settlementRows, cogsMap, fixedCosts, adSpendCurrentMonth, pnlPeriod]);
 
   const pnlByAsin = useMemo(
@@ -1014,10 +1316,280 @@ export default function App() {
     direction: "desc",
   });
 
-  // -------------------- TABS --------------------
+  // FSN / Amazon-specific data
+  const referenceByAsin = useMemo(() => {
+    const map = new Map();
+    itemRefSheet.forEach((row) => {
+      const asin = normalizeText(pick(row, ["asin", "ASIN"])).toUpperCase();
+      if (!asin) return;
+      map.set(asin, {
+        asin,
+        parentAsin: normalizeText(pick(row, ["parent asin", "Parent ASIN"], "")),
+        shortTitle: normalizeText(pick(row, ["short title", "Short Title"], "")),
+        brand: normalizeText(pick(row, ["brand", "Brand"], "")),
+        type: normalizeText(pick(row, ["type", "Type", "item type", "Item Type"], "")),
+        imageUrl: inferImageUrl(row),
+      });
+    });
+    return map;
+  }, [itemRefSheet]);
+
+  const fbmOnlyAsins = useMemo(() => {
+    const set = new Set();
+    fbmOnly.forEach((row) => {
+      const asin = pick(row, ["ASIN", "asin", "Asin"], "");
+      const trimmed = String(asin || "").trim().toUpperCase();
+      if (trimmed) set.add(trimmed);
+    });
+    return set;
+  }, [fbmOnly]);
+
+  const isFbmOnly = (asin) =>
+    fbmOnlyAsins.has(String(asin || "").trim().toUpperCase());
+
+  // Campaign Trends
+  const campaignsByWindow = useMemo(() => {
+    return {
+      "7": [
+        ...parseCampaignBulkSheet(spCampaigns7, "Sponsored Products"),
+        ...parseCampaignBulkSheet(sbCampaigns7, "Sponsored Brands"),
+        ...parseCampaignBulkSheet(sdCampaigns7, "Sponsored Display"),
+      ],
+      "30": [
+        ...parseCampaignBulkSheet(spCampaigns, "Sponsored Products"),
+        ...parseCampaignBulkSheet(sbCampaigns, "Sponsored Brands"),
+        ...parseCampaignBulkSheet(sdCampaigns, "Sponsored Display"),
+      ],
+      "60": [
+        ...parseCampaignBulkSheet(spCampaigns60, "Sponsored Products"),
+        ...parseCampaignBulkSheet(sbCampaigns60, "Sponsored Brands"),
+        ...parseCampaignBulkSheet(sdCampaigns60, "Sponsored Display"),
+      ],
+    };
+  }, [spCampaigns, sbCampaigns, sdCampaigns, spCampaigns7, sbCampaigns7, sdCampaigns7, spCampaigns60, sbCampaigns60, sdCampaigns60]);
+
+  const campaignTrends = useMemo(() => {
+    const map = new Map();
+    for (const w of ["7", "30", "60"]) {
+      for (const r of campaignsByWindow[w]) {
+        if (!r.campaignName) continue;
+        const key = `${r.adType}||${r.campaignName}`;
+        const existing = map.get(key) || {
+          adType: r.adType,
+          campaignName: r.campaignName,
+          state: r.state,
+          windows: {},
+        };
+        existing.windows[w] = r;
+        if (w === "7" && r.state) existing.state = r.state;
+        else if (!existing.state && r.state) existing.state = r.state;
+        map.set(key, existing);
+      }
+    }
+    return [...map.values()].map((trend) => ({
+      ...trend,
+      category: categorizeCampaign(trend),
+    }));
+  }, [campaignsByWindow]);
+
+  // Inventory
+  const fbaInventoryRows = useMemo(
+    () => parseInventoryRows(inventoryFba, referenceByAsin, "fba"),
+    [inventoryFba, referenceByAsin]
+  );
+
+  const awdInventoryRows = useMemo(
+    () => parseInventoryRows(inventoryAwd, referenceByAsin, "awd"),
+    [inventoryAwd, referenceByAsin]
+  );
+
+  const salesByAsin30d = useMemo(() => {
+    const map = new Map();
+    products30d.forEach((row) => {
+      const asin = normalizeText(
+        pick(row, ["(Child) ASIN", "Child ASIN", "child asin", "ASIN", "asin"], "")
+      ).toUpperCase();
+      if (!asin) return;
+      const ref = referenceByAsin.get(asin) || {};
+      const unitsOrdered = normalizeNumber(
+        pick(row, ["Units Ordered", "units ordered", "Ordered Product Sales Units"], 0)
+      );
+      const current = map.get(asin) || {
+        asin,
+        shortTitle: ref.shortTitle || asin,
+        brand: ref.brand || "",
+        parentAsin: ref.parentAsin || "",
+        itemType: ref.type || "",
+        imageUrl:
+          ref.imageUrl ||
+          `https://images-na.ssl-images-amazon.com/images/P/${asin}.01._SL120_.jpg`,
+        units30d: 0,
+      };
+      current.units30d += unitsOrdered;
+      map.set(asin, current);
+    });
+    return map;
+  }, [products30d, referenceByAsin]);
+
+  const inventoryByAsin = useMemo(() => {
+    const map = new Map();
+    const upsert = (rows, channel) => {
+      rows.forEach((row) => {
+        if (!row.asin) return;
+        const current = map.get(row.asin) || {
+          asin: row.asin,
+          shortTitle: row.shortTitle,
+          brand: row.brand,
+          parentAsin: row.parentAsin,
+          itemType: row.itemType,
+          imageUrl: row.imageUrl,
+          fbaUnits: 0,
+          awdUnits: 0,
+        };
+        if (channel === "fba") current.fbaUnits += row.units;
+        if (channel === "awd") current.awdUnits += row.units;
+        map.set(row.asin, current);
+      });
+    };
+    upsert(fbaInventoryRows, "fba");
+    upsert(awdInventoryRows, "awd");
+
+    return [...map.values()].map((row) => {
+      const salesRef = salesByAsin30d.get(row.asin) || {};
+      const units30d = normalizeNumber(salesRef.units30d);
+      const unitsPerDay = units30d / 30;
+      const totalUnits = row.fbaUnits + row.awdUnits;
+      const daysOfCover = unitsPerDay > 0 ? totalUnits / unitsPerDay : Number.POSITIVE_INFINITY;
+      return {
+        ...row,
+        units30d,
+        unitsPerDay,
+        totalUnits,
+        daysOfCover,
+        urgency: !Number.isFinite(daysOfCover)
+          ? "no_sales"
+          : daysOfCover < DAYS_URGENT
+          ? "urgent"
+          : daysOfCover < DAYS_TO_SHIP_TARGET
+          ? "replenish"
+          : "healthy",
+      };
+    });
+  }, [fbaInventoryRows, awdInventoryRows, salesByAsin30d]);
+
+  // Search Terms
+  const spExistingNegatives = useMemo(() => {
+    return spCampaigns
+      .filter((row) => {
+        const entity = normalizeText(pick(row, ["Entity", "entity"])).toLowerCase();
+        const matchType = normalizeText(pick(row, ["Match Type"])).toLowerCase();
+        return entity.includes("negative") || matchType.includes("negative");
+      })
+      .map((row) => ({
+        adType: "Sponsored Products",
+        entity: normalizeText(pick(row, ["Entity"])),
+        campaign: normalizeText(pick(row, ["Campaign Name (Informational only)", "Campaign Name"], "—")),
+        adGroup: normalizeText(pick(row, ["Ad Group Name (Informational only)", "Ad Group Name"], "—")),
+        term: normalizeText(pick(row, ["Keyword Text", "Product Targeting Expression"], "")),
+        matchType: normalizeText(pick(row, ["Match Type"], "—")),
+        state: normalizeText(pick(row, ["State"], "—")),
+      }))
+      .filter((row) => row.term);
+  }, [spCampaigns]);
+
+  const sbExistingNegatives = useMemo(() => {
+    return sbCampaigns
+      .filter((row) => {
+        const entity = normalizeText(pick(row, ["Entity", "entity"])).toLowerCase();
+        const matchType = normalizeText(pick(row, ["Match Type"])).toLowerCase();
+        return entity.includes("negative") || matchType.includes("negative");
+      })
+      .map((row) => ({
+        adType: "Sponsored Brands",
+        entity: normalizeText(pick(row, ["Entity"])),
+        campaign: normalizeText(pick(row, ["Campaign Name (Informational only)", "Campaign Name"], "—")),
+        adGroup: normalizeText(pick(row, ["Ad Group Name (Informational only)", "Ad Group Name"], "—")),
+        term: normalizeText(pick(row, ["Keyword Text", "Product Targeting Expression"], "")),
+        matchType: normalizeText(pick(row, ["Match Type"], "—")),
+        state: normalizeText(pick(row, ["State"], "—")),
+      }))
+      .filter((row) => row.term);
+  }, [sbCampaigns]);
+
+  const existingNegatives = useMemo(() => {
+    return [...spExistingNegatives, ...sbExistingNegatives];
+  }, [spExistingNegatives, sbExistingNegatives]);
+
+  const existingNegativeSet = useMemo(() => {
+    return new Set(existingNegatives.map((row) => `${row.adType}||${row.term.toLowerCase()}`));
+  }, [existingNegatives]);
+
+  const unifiedSearchTerms = useMemo(() => {
+    const sp = spSearchTerms.map((row) => ({
+      adType: "Sponsored Products",
+      campaign: normalizeText(pick(row, ["Campaign Name (Informational only)"], "—")),
+      adGroup: normalizeText(pick(row, ["Ad Group Name (Informational only)"], "—")),
+      state: normalizeText(pick(row, ["State"], "—")),
+      keywordText: normalizeText(pick(row, ["Keyword Text"], "")),
+      matchType: normalizeText(pick(row, ["Match Type"], "—")),
+      searchTerm: normalizeText(pick(row, ["Customer Search Term"], "")),
+      clicks: normalizeNumber(pick(row, ["Clicks"], 0)),
+      spend: normalizeNumber(pick(row, ["Spend"], 0)),
+      orders: normalizeNumber(pick(row, ["Orders"], 0)),
+      units: normalizeNumber(pick(row, ["Units"], 0)),
+      sales: normalizeNumber(pick(row, ["Sales"], 0)),
+      impressions: normalizeNumber(pick(row, ["Impressions"], 0)),
+      ctr: normalizeNumber(pick(row, ["Click-through Rate"], 0)) * 100,
+      cvr: normalizeNumber(pick(row, ["Conversion Rate"], 0)) * 100,
+    }));
+
+    const sb = sbSearchTerms.map((row) => ({
+      adType: "Sponsored Brands",
+      campaign: normalizeText(pick(row, ["Campaign Name (Informational only)"], "—")),
+      adGroup: normalizeText(pick(row, ["Ad Group Name (Informational only)"], "—")),
+      state: normalizeText(pick(row, ["State"], "—")),
+      keywordText: normalizeText(pick(row, ["Keyword Text"], "")),
+      matchType: normalizeText(pick(row, ["Match Type"], "—")),
+      searchTerm: normalizeText(pick(row, ["Customer Search Term"], "")),
+      clicks: normalizeNumber(pick(row, ["Clicks"], 0)),
+      spend: normalizeNumber(pick(row, ["Spend"], 0)),
+      orders: normalizeNumber(pick(row, ["Orders"], 0)),
+      units: normalizeNumber(pick(row, ["Units"], 0)),
+      sales: normalizeNumber(pick(row, ["Sales"], 0)),
+      impressions: normalizeNumber(pick(row, ["Impressions"], 0)),
+      ctr: normalizeNumber(pick(row, ["Click-through Rate"], 0)) * 100,
+      cvr: normalizeNumber(pick(row, ["Conversion Rate"], 0)) * 100,
+    }));
+
+    return [...sp, ...sb].filter((row) => row.searchTerm);
+  }, [spSearchTerms, sbSearchTerms]);
+
+  const recommendedNegatives = useMemo(() => {
+    return unifiedSearchTerms
+      .filter((row) => row.clicks >= NEGATIVE_CLICK_THRESHOLD && row.orders === 0 && row.units === 0)
+      .map((row) => ({
+        ...row,
+        suggestedNegativeType:
+          row.matchType && row.matchType.toLowerCase().includes("broad")
+            ? "Negative Phrase"
+            : "Negative Exact",
+        alreadyBlocked: existingNegativeSet.has(`${row.adType}||${row.searchTerm.toLowerCase()}`),
+      }))
+      .sort((a, b) => b.spend - a.spend);
+  }, [unifiedSearchTerms, existingNegativeSet]);
+
+  // Tabs
   const tabs = [
     { id: "overview", label: "Overview", icon: BarChart3 },
+    { id: "whatChanged", label: "What Changed?", icon: Activity },
+    { id: "alerts", label: "Alerts", icon: Bell },
     { id: "pnl", label: "P&L", icon: Wallet },
+    { id: "advertising", label: "Advertising", icon: Megaphone },
+    { id: "campaignTrends", label: "Campaign Trends", icon: TrendingUp },
+    { id: "targeting", label: "Targeting", icon: Search },
+    { id: "searchTerms", label: "Search Terms", icon: ShieldMinus },
+    { id: "inventory", label: "Inventory", icon: Warehouse },
+    { id: "catalog", label: "Catalog", icon: Package },
     { id: "buyBox", label: "Buy Box", icon: ShoppingBag },
     { id: "listingQuality", label: "Listing Quality", icon: FileText },
     { id: "returns", label: "Returns", icon: RefreshCw },
@@ -1028,7 +1600,6 @@ export default function App() {
     { id: "settings", label: "Settings", icon: SettingsIcon },
   ];
 
-  // -------------------- LOADING STATE --------------------
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-950 text-white">
@@ -1037,8 +1608,7 @@ export default function App() {
     );
   }
 
-  // -------------------- LAYOUT --------------------
-  const periodOptions = (loadedMonthsByChannel[activeChannel] || []).map((ym) => ({
+  const periodOptions = (loadedMonthsByChannel[activeScope[0]] || []).map((ym) => ({
     value: ym,
     label: ymToLabel(ym),
   }));
@@ -1046,6 +1616,13 @@ export default function App() {
   const channelOptions = enabledChannels.length
     ? enabledChannels.map((c) => ({ value: c.code, label: c.name }))
     : [{ value: "amzsc", label: "Amazon Seller Central (default)" }];
+
+  // Channel scope selection
+  const scopeLabel = activeScope.length === 1
+    ? activeScope[0] === "amzsc" ? "Amazon SC" : activeScope[0]
+    : activeScope.length === 2 && activeScope.includes("amzsc") && activeScope.includes("amzvc") ? "Amazon Combined"
+    : activeScope.length === 3 && activeScope.includes("wmt1p") && activeScope.includes("wmt3p") && activeScope.includes("wmtother") ? "Walmart Combined"
+    : `${activeScope.length} channels`;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -1073,34 +1650,94 @@ export default function App() {
 
           <div className="mt-5">
             <p className="mb-2 text-[11px] uppercase tracking-wider text-slate-500">
-              Channel
+              Channel Scope
             </p>
-            <select
-              value={activeChannel}
-              onChange={(e) => {
-                setActiveChannel(e.target.value);
-                setPnlPeriod("");
-              }}
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
-            >
-              {channelOptions.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
+            <div className="space-y-2">
+              {/* Predefined groups */}
+              <button
+                onClick={() => {
+                  const amzscCode = channels.find(c => c.code === "amzsc");
+                  const amzvcCode = channels.find(c => c.code === "amzvc");
+                  const both = [amzscCode, amzvcCode].filter(c => c && c.enabled).map(c => c.code);
+                  if (both.length > 0) setActiveScope(both);
+                }}
+                className={cn(
+                  "block w-full text-left px-3 py-2 rounded-2xl border text-xs transition",
+                  activeScope.length === 2 && activeScope.includes("amzsc") && activeScope.includes("amzvc")
+                    ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                    : "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
+                )}
+              >
+                Amazon Combined
+              </button>
+              <button
+                onClick={() => {
+                  const codes = channels.filter(c => ["wmt1p", "wmt3p", "wmtother"].includes(c.code) && c.enabled).map(c => c.code);
+                  if (codes.length > 0) setActiveScope(codes);
+                }}
+                className={cn(
+                  "block w-full text-left px-3 py-2 rounded-2xl border text-xs transition",
+                  activeScope.length >= 2 && activeScope.includes("wmt1p")
+                    ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                    : "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
+                )}
+              >
+                Walmart Combined
+              </button>
+              <button
+                onClick={() => {
+                  const codes = channels.filter(c => c.enabled).map(c => c.code);
+                  if (codes.length > 0) setActiveScope(codes);
+                }}
+                className={cn(
+                  "block w-full text-left px-3 py-2 rounded-2xl border text-xs transition",
+                  activeScope.length === channels.filter(c => c.enabled).length
+                    ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                    : "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
+                )}
+              >
+                All Channels
+              </button>
+              <select
+                value={JSON.stringify(activeScope)}
+                onChange={(e) => {
+                  try {
+                    setActiveScope(JSON.parse(e.target.value));
+                  } catch {
+                    setActiveScope(["amzsc"]);
+                  }
+                }}
+                className="w-full rounded-2xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
+              >
+                <option value={JSON.stringify(activeScope)}>
+                  {activeScope.length === 1 ? `Single: ${activeScope[0]}` : `Custom (${activeScope.length})`}
                 </option>
-              ))}
-            </select>
+                {channels.filter(c => c.enabled).map((c) => (
+                  <option key={c.code} value={JSON.stringify([c.code])}>
+                    {c.name}
+                  </option>
+                ))}
+                <option value="custom">Custom multi-select...</option>
+              </select>
+            </div>
           </div>
 
           <div className="mt-5 space-y-1.5">
-            {tabs.map((tab) => (
-              <SidebarButton
-                key={tab.id}
-                active={activeTab === tab.id}
-                icon={tab.icon}
-                label={tab.label}
-                onClick={() => setActiveTab(tab.id)}
-              />
-            ))}
+            {tabs.map((tab) => {
+              // FSN pages visible only when scope includes amzsc
+              const fsn_pages = ["advertising", "campaignTrends", "targeting", "searchTerms", "inventory", "catalog"];
+              const isVisible = !fsn_pages.includes(tab.id) || activeScope.includes("amzsc");
+              if (!isVisible) return null;
+              return (
+                <SidebarButton
+                  key={tab.id}
+                  active={activeTab === tab.id}
+                  icon={tab.icon}
+                  label={tab.label}
+                  onClick={() => setActiveTab(tab.id)}
+                />
+              );
+            })}
           </div>
         </aside>
 
@@ -1112,9 +1749,7 @@ export default function App() {
                 {BRAND_NAME} Dashboard
               </h1>
               <p className="mt-2 text-sm text-slate-400">
-                {(channels.find((c) => c.code === activeChannel) || {}).name ||
-                  activeChannel}
-                {" · "}Live from Google Sheets.
+                {scopeLabel} · Live from Google Sheets.
               </p>
             </div>
 
@@ -1194,7 +1829,7 @@ export default function App() {
                           key={c.code}
                           className={cn(
                             "rounded-2xl border p-4",
-                            c.code === activeChannel
+                            c.code === activeScope[0]
                               ? "border-cyan-400/40 bg-cyan-400/5"
                               : "border-slate-800 bg-slate-950"
                           )}
@@ -1222,14 +1857,33 @@ export default function App() {
                     {pnlPeriod ? ymToLabel(pnlPeriod) : "no period yet"}
                   </li>
                   <li>
-                    🟡 <strong className="text-white">Buy Box, Listing Quality, Returns,
-                    Launch Tracker, Pricing Parity, Channel Comparison, Promotions &
-                    Fees</strong> — pages exist, awaiting their respective sheet tabs.
-                    Open each to see exactly which tab to populate.
+                    ✅ <strong className="text-white">Advertising & Search Terms</strong> — live for Amazon Seller Central
+                  </li>
+                  <li>
+                    🟡 <strong className="text-white">What Changed, Alerts, Buy Box, Listing Quality, Returns, Launch Tracker, Pricing Parity, Channel Comparison, Promotions & Fees</strong> — pages exist, awaiting their respective sheet tabs.
                   </li>
                 </ul>
               </SectionCard>
             </div>
+          )}
+
+          {/* ===================== WHAT CHANGED? ===================== */}
+          {activeTab === "whatChanged" && (
+            <WhatChangedPage
+              settlementRows={settlementRows}
+              cogsMap={cogsMap}
+              referenceByAsin={referenceByAsin}
+            />
+          )}
+
+          {/* ===================== ALERTS ===================== */}
+          {activeTab === "alerts" && (
+            <AlertsPage
+              settlementRows={settlementRows}
+              inventoryByAsin={inventoryByAsin}
+              cogsMap={cogsMap}
+              referenceByAsin={referenceByAsin}
+            />
           )}
 
           {/* ===================== P&L ===================== */}
@@ -1239,15 +1893,65 @@ export default function App() {
               pnlPeriod={pnlPeriod}
               setPnlPeriod={setPnlPeriod}
               periodOptions={periodOptions}
-              loadedMonths={loadedMonthsByChannel[activeChannel] || []}
+              loadedMonths={loadedMonthsByChannel[activeScope[0]] || []}
               asinRows={asinSort.sortedRows}
               asinSort={asinSort}
               channelName={
-                (channels.find((c) => c.code === activeChannel) || {}).name || activeChannel
+                (channels.find((c) => c.code === activeScope[0]) || {}).name || activeScope[0]
               }
               hasCogs={cogsMap.size > 0}
               hasFixedCosts={fixedCosts.length > 0}
               hasAdSpend={adSpendCurrentMonth > 0}
+            />
+          )}
+
+          {/* ===================== ADVERTISING (FSN) ===================== */}
+          {activeTab === "advertising" && (
+            <AdvertisingPage
+              spCampaigns={spCampaigns}
+              sbCampaigns={sbCampaigns}
+              sdCampaigns={sdCampaigns}
+            />
+          )}
+
+          {/* ===================== CAMPAIGN TRENDS (FSN) ===================== */}
+          {activeTab === "campaignTrends" && (
+            <CampaignTrendsPage
+              campaignTrends={campaignTrends}
+            />
+          )}
+
+          {/* ===================== TARGETING (FSN) ===================== */}
+          {activeTab === "targeting" && (
+            <TargetingPage
+              spCampaigns={spCampaigns}
+              referenceByAsin={referenceByAsin}
+            />
+          )}
+
+          {/* ===================== SEARCH TERMS (FSN) ===================== */}
+          {activeTab === "searchTerms" && (
+            <SearchTermsPage
+              recommendedNegatives={recommendedNegatives}
+              unifiedSearchTerms={unifiedSearchTerms}
+            />
+          )}
+
+          {/* ===================== INVENTORY (FSN) ===================== */}
+          {activeTab === "inventory" && (
+            <InventoryPage
+              inventoryByAsin={inventoryByAsin}
+            />
+          )}
+
+          {/* ===================== CATALOG (FSN) ===================== */}
+          {activeTab === "catalog" && (
+            <CatalogPage
+              spCampaigns={spCampaigns}
+              sbCampaigns={sbCampaigns}
+              sdCampaigns={sdCampaigns}
+              referenceByAsin={referenceByAsin}
+              isFbmOnly={isFbmOnly}
             />
           )}
 
@@ -1622,110 +2326,995 @@ function PnLPage({
 }
 
 // =============================================================================
-// SETTINGS PAGE
+// FSN PAGES (Advertising, Campaign Trends, Search Terms, Inventory, Catalog)
 // =============================================================================
 
-function SettingsPage({
-  channels,
-  loadedMonthsByChannel,
-  cogsCount,
-  fixedCostsCount,
-  hasAdData,
-  sheetId,
-}) {
+function AdvertisingPage({ spCampaigns, sbCampaigns, sdCampaigns }) {
+  const allCampaigns = useMemo(() => {
+    const sp = (spCampaigns || [])
+      .filter((row) => normalizeText(pick(row, ["Entity", "entity"])).toLowerCase() === "campaign")
+      .map((row) => {
+        const spend = normalizeNumber(pick(row, ["Spend", "Cost"]));
+        const sales = normalizeNumber(pick(row, ["Sales", "Attributed Sales"]));
+        return {
+          adType: "Sponsored Products",
+          campaignName: normalizeText(pick(row, ["Campaign Name"])),
+          state: normalizeText(pick(row, ["State"], "—")),
+          spend,
+          sales,
+          orders: normalizeNumber(pick(row, ["Orders"])),
+          impressions: normalizeNumber(pick(row, ["Impressions"])),
+          clicks: normalizeNumber(pick(row, ["Clicks"])),
+          roas: spend ? sales / spend : 0,
+        };
+      });
+    const sb = (sbCampaigns || [])
+      .filter((row) => normalizeText(pick(row, ["Entity", "entity"])).toLowerCase() === "campaign")
+      .map((row) => {
+        const spend = normalizeNumber(pick(row, ["Spend", "Cost"]));
+        const sales = normalizeNumber(pick(row, ["Sales", "Attributed Sales"]));
+        return {
+          adType: "Sponsored Brands",
+          campaignName: normalizeText(pick(row, ["Campaign Name"])),
+          state: normalizeText(pick(row, ["State"], "—")),
+          spend,
+          sales,
+          orders: normalizeNumber(pick(row, ["Orders"])),
+          impressions: normalizeNumber(pick(row, ["Impressions"])),
+          clicks: normalizeNumber(pick(row, ["Clicks"])),
+          roas: spend ? sales / spend : 0,
+        };
+      });
+    const sd = (sdCampaigns || [])
+      .filter((row) => normalizeText(pick(row, ["Entity", "entity"])).toLowerCase() === "campaign")
+      .map((row) => {
+        const spend = normalizeNumber(pick(row, ["Spend", "Cost"]));
+        const sales = normalizeNumber(pick(row, ["Sales", "Attributed Sales"]));
+        return {
+          adType: "Sponsored Display",
+          campaignName: normalizeText(pick(row, ["Campaign Name"])),
+          state: normalizeText(pick(row, ["State"], "—")),
+          spend,
+          sales,
+          orders: normalizeNumber(pick(row, ["Orders"])),
+          impressions: normalizeNumber(pick(row, ["Impressions"])),
+          clicks: normalizeNumber(pick(row, ["Clicks"])),
+          roas: spend ? sales / spend : 0,
+        };
+      });
+    return [...sp, ...sb, ...sd];
+  }, [spCampaigns, sbCampaigns, sdCampaigns]);
+
+  const summary = useMemo(() => {
+    return {
+      spend: allCampaigns.reduce((s, r) => s + r.spend, 0),
+      sales: allCampaigns.reduce((s, r) => s + r.sales, 0),
+      orders: allCampaigns.reduce((s, r) => s + r.orders, 0),
+      count: allCampaigns.length,
+    };
+  }, [allCampaigns]);
+
   return (
     <div className="space-y-6">
-      <SectionCard
-        title="Connected Sheet"
-        subtitle="The Google Sheet ID this dashboard is reading from."
-      >
-        <div className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/40 p-4 text-sm">
-          <code className="break-all text-cyan-300">{sheetId}</code>
-          <a
-            href={`https://docs.google.com/spreadsheets/d/${sheetId}/edit`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-4 shrink-0 rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:border-cyan-400 hover:text-cyan-300"
-          >
-            Open ↗
-          </a>
-        </div>
-        <p className="mt-3 text-xs text-slate-500">
-          Override per-deployment by setting <code>VITE_SHEET_ID</code> in Vercel env vars.
-        </p>
-      </SectionCard>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Total Spend" value={summary.spend} icon={Megaphone} />
+        <StatCard label="Total Sales" value={summary.sales} icon={DollarSign} />
+        <CountCard label="Active Campaigns" value={summary.count} icon={BarChart3} />
+        <StatCard label="ROAS" value={summary.spend ? summary.sales / summary.spend : 0} suffix="x" icon={TrendingUp} />
+      </div>
 
-      <SectionCard
-        title="Structural Sheets"
-        subtitle="Status of the tabs the dashboard reads on every page."
-      >
-        <ul className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <li className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4 text-sm">
-            <p className="font-mono text-cyan-300">channel_config</p>
-            <p className="mt-1 text-slate-400">
-              {channels.filter((c) => c.enabled).length} enabled · {channels.length} total
-              registered
-            </p>
-          </li>
-          <li className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4 text-sm">
-            <p className="font-mono text-cyan-300">cogs</p>
-            <p className="mt-1 text-slate-400">
-              {cogsCount} SKUs with landed costs
-              {cogsCount === 0 ? " — populate for accurate margin" : ""}
-            </p>
-          </li>
-          <li className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4 text-sm">
-            <p className="font-mono text-cyan-300">fixed_costs_monthly</p>
-            <p className="mt-1 text-slate-400">
-              {fixedCostsCount} entries
-              {fixedCostsCount === 0 ? " — Personnel Expenses will show $0" : ""}
-            </p>
-          </li>
-          <li className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4 text-sm">
-            <p className="font-mono text-cyan-300">Ad Reports</p>
-            <p className="mt-1 text-slate-400">
-              {hasAdData ? "Loaded" : "Not loaded"} · expects Sponsored Products /
-              Brands / Display Campaigns tabs (bulk operations format)
-            </p>
-          </li>
-        </ul>
-      </SectionCard>
-
-      <SectionCard
-        title="Channel Settlement Status"
-        subtitle="How many monthly settlement tabs have been discovered per channel."
-      >
-        <ul className="space-y-2 text-sm">
-          {channels.map((c) => {
-            const months = loadedMonthsByChannel[c.code] || [];
-            return (
-              <li
-                key={c.code}
-                className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/40 p-3"
-              >
-                <span>
-                  <span
-                    className={cn(
-                      "font-medium",
-                      c.enabled ? "text-white" : "text-slate-500"
-                    )}
-                  >
-                    {c.name}
-                  </span>
-                  <span className="ml-2 text-xs text-slate-500">({c.code})</span>
-                </span>
-                <span className="text-xs text-slate-400">
-                  {months.length
-                    ? `${months.length} months · latest ${ymToShort(months[0])}`
-                    : c.enabled
-                      ? "No settlement data yet"
-                      : "Disabled"}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
+      <SectionCard title="Campaigns" subtitle="All active campaigns across all ad types">
+        {allCampaigns.length === 0 ? (
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-5 text-sm text-slate-400">
+            No campaigns loaded yet. Populate the Sponsored Products / Brands / Display Campaigns tabs.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {allCampaigns.slice(0, 20).map((row, i) => (
+              <div key={i} className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/40 p-3">
+                <div className="min-w-0">
+                  <p className="font-medium text-white truncate">{row.campaignName || "—"}</p>
+                  <p className="text-xs text-slate-400">{row.adType} • {row.state}</p>
+                </div>
+                <div className="text-right">
+                  <p className="font-mono text-sm text-cyan-300">{currency(row.spend)}</p>
+                  <p className="text-xs text-slate-400">{row.roas && row.roas > 0 ? row.roas.toFixed(2) : "—"}x ROAS</p>
+                </div>
+              </div>
+            ))}
+            {allCampaigns.length > 20 && (
+              <p className="text-center text-xs text-slate-500 pt-2">+{allCampaigns.length - 20} more campaigns</p>
+            )}
+          </div>
+        )}
       </SectionCard>
     </div>
   );
 }
+
+function CampaignTrendsPage({ campaignTrends }) {
+  return (
+    <SectionCard
+      title="Campaign Trends"
+      subtitle="7/30/60-day ROAS trending: Improving → Declining, Hidden Gems, Bleeding campaigns."
+    >
+      {campaignTrends.length === 0 ? (
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-5 text-sm text-slate-400">
+          No campaign data loaded yet. Populate Sponsored Products / Brands / Display Campaigns sheets.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {campaignTrends.slice(0, 6).map((trend) => (
+            <div key={`${trend.adType}||${trend.campaignName}`} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-cyan-300">{trend.campaignName}</p>
+                  <p className="text-xs text-slate-400">{trend.adType}</p>
+                </div>
+                <CategoryPill categoryId={trend.category} />
+              </div>
+              <p className="mt-2 text-sm text-slate-300">Action: {CAMPAIGN_CATEGORIES.find(c => c.id === trend.category)?.action || "Monitor"}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+function SearchTermsPage({ recommendedNegatives, unifiedSearchTerms }) {
+  const count = recommendedNegatives.length;
+  return (
+    <SectionCard
+      title="Recommended Negatives"
+      subtitle={`${count} search terms with ≥${NEGATIVE_CLICK_THRESHOLD} clicks and zero orders`}
+    >
+      {recommendedNegatives.length === 0 ? (
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-5 text-sm text-slate-400">
+          No recommended negatives (all high-click terms are converting).
+        </div>
+      ) : (
+        <div className="space-y-2 text-sm">
+          {recommendedNegatives.slice(0, 5).map((row, i) => (
+            <div key={i} className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/40 p-3">
+              <div>
+                <p className="font-medium text-white">{row.searchTerm}</p>
+                <p className="text-xs text-slate-400">{row.campaign} · {row.adType}</p>
+              </div>
+              <div className="text-right">
+                <p className="font-mono text-cyan-300">{currency(row.spend)}</p>
+                <p className="text-xs text-slate-400">{numberFmt(row.clicks)} clicks</p>
+              </div>
+            </div>
+          ))}
+          {recommendedNegatives.length > 5 && (
+            <p className="text-xs text-slate-500 text-center">
+              +{recommendedNegatives.length - 5} more
+            </p>
+          )}
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+// =============================================================================
+// INVENTORY PAGE (FSN port — days of cover, urgency pills, exports)
+// =============================================================================
+
+function InventoryPage({ inventoryByAsin = [] }) {
+  if (!inventoryByAsin.length) {
+    return (
+      <EmptyStateCard
+        title="Inventory"
+        icon={Warehouse}
+        body="Days-of-cover by ASIN across FBA + AWD, with urgency pills (urgent < 14d, replenish < 60d). Includes CSV export."
+        requiredSheets={["inventory_fba", "inventory_awd", "products_30d", "item_data_reference"]}
+      />
+    );
+  }
+  const urgent = inventoryByAsin.filter((r) => r.urgency === "urgent");
+  const replenish = inventoryByAsin.filter((r) => r.urgency === "replenish");
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <CountCard label="Total FBA Units" value={inventoryByAsin.reduce((s, r) => s + (r.fbaUnits || 0), 0)} icon={Warehouse} />
+        <CountCard label="Urgent (< 14d)" value={urgent.length} icon={AlertTriangle} tone="rose" />
+        <CountCard label="Replenish (< 60d)" value={replenish.length} icon={Package} tone="amber" />
+        <CountCard label="Total Products" value={inventoryByAsin.length} icon={Boxes} tone="slate" />
+      </div>
+      <SectionCard
+        title="Low-Cover Inventory"
+        subtitle="ASINs with less than 60 days of stock, sorted by urgency."
+        right={
+          <ExportButton
+            filename="inventory-low-cover.csv"
+            rows={inventoryByAsin.filter((r) => r.daysOfCover < DAYS_TO_SHIP_TARGET)}
+            columns={[
+              { key: "asin", label: "ASIN" },
+              { key: "shortTitle", label: "Title" },
+              { key: "fbaUnits", label: "FBA" },
+              { key: "awdUnits", label: "AWD" },
+              { key: "daysOfCover", label: "Days Cover" },
+              { key: "urgency", label: "Urgency" },
+            ]}
+          />
+        }
+      >
+        {inventoryByAsin.filter((r) => r.daysOfCover < DAYS_TO_SHIP_TARGET).length === 0 ? (
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-5 text-sm text-slate-400">All inventory levels look healthy.</div>
+        ) : (
+          <div className="space-y-2 text-sm">
+            {inventoryByAsin
+              .filter((r) => r.daysOfCover < DAYS_TO_SHIP_TARGET)
+              .sort((a, b) => (a.daysOfCover || 0) - (b.daysOfCover || 0))
+              .slice(0, 25)
+              .map((row) => (
+                <div key={row.asin} className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/40 p-3">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <AsinImage src={row.imageUrl} title={row.shortTitle} />
+                    <div className="min-w-0">
+                      <p className="truncate font-medium text-cyan-300">{row.asin}</p>
+                      <p className="truncate text-xs text-slate-400">{row.shortTitle}</p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-mono text-white">{daysLabel(row.daysOfCover)}</p>
+                    {urgencyPill(row.daysOfCover)}
+                  </div>
+                </div>
+              ))}
+          </div>
+        )}
+      </SectionCard>
+      <SectionCard
+        title="All Inventory"
+        subtitle={`${inventoryByAsin.length} ASINs across FBA + AWD`}
+        right={
+          <ExportButton
+            filename="inventory-all.csv"
+            rows={inventoryByAsin}
+            columns={[
+              { key: "asin", label: "ASIN" },
+              { key: "shortTitle", label: "Title" },
+              { key: "fbaUnits", label: "FBA Units" },
+              { key: "awdUnits", label: "AWD Units" },
+              { key: "daysOfCover", label: "Days of Cover" },
+              { key: "urgency", label: "Urgency" },
+            ]}
+          />
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                <th className="px-3 py-2">ASIN</th>
+                <th className="px-3 py-2 text-right">FBA</th>
+                <th className="px-3 py-2 text-right">AWD</th>
+                <th className="px-3 py-2 text-right">Days Cover</th>
+                <th className="px-3 py-2 text-right">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {inventoryByAsin.slice(0, 250).map((row) => (
+                <tr key={row.asin} className="border-b border-slate-900 hover:bg-slate-900/30">
+                  <td className="px-3 py-2 font-mono text-cyan-300">{row.asin}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{row.fbaUnits}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{row.awdUnits}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{daysLabel(row.daysOfCover)}</td>
+                  <td className="px-3 py-2 text-right">{urgencyPill(row.daysOfCover)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// TARGETING PAGE (FSN port — competitor ASIN targets from SP campaigns)
+// =============================================================================
+
+function TargetingPage({ spCampaigns = [], referenceByAsin }) {
+  const targets = useMemo(() => {
+    if (!spCampaigns.length) return [];
+    return spCampaigns
+      .map((c) => {
+        const tgt = c.targeting || c.keyword || c.name || "";
+        const m = String(tgt).match(/B0[A-Z0-9]{8}/);
+        const asin = m ? m[0] : null;
+        const ref = asin && referenceByAsin && referenceByAsin.get ? referenceByAsin.get(asin) : null;
+        const spend = num(c.spend);
+        const sales = num(c.sales);
+        return {
+          targeting: tgt || "—",
+          asin,
+          campaign: c.campaignName || c.name || "—",
+          impressions: num(c.impressions),
+          clicks: num(c.clicks),
+          spend,
+          sales,
+          orders: num(c.orders),
+          acos: spend > 0 && sales > 0 ? (spend / sales) * 100 : 0,
+          roas: spend > 0 ? sales / spend : 0,
+          imageUrl: ref ? ref.imageUrl : undefined,
+          title: ref ? ref.title : undefined,
+        };
+      })
+      .filter((t) => t.spend > 0 || t.clicks > 0)
+      .sort((a, b) => b.spend - a.spend);
+  }, [spCampaigns, referenceByAsin]);
+
+  if (!targets.length) {
+    return (
+      <EmptyStateCard
+        title="Targeting"
+        icon={Target}
+        body="Per-target performance for SP campaigns. Highlights competitor ASIN targets and recommends bid adjustments based on ROAS."
+        requiredSheets={["Sponsored Products Campaigns"]}
+      />
+    );
+  }
+  const totalSpend = targets.reduce((s, t) => s + t.spend, 0);
+  const totalSales = targets.reduce((s, t) => s + t.sales, 0);
+  const totalOrders = targets.reduce((s, t) => s + t.orders, 0);
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <CountCard label="Total Targets" value={targets.length} icon={Target} />
+        <StatCard label="Spend" value={currency(totalSpend)} icon={DollarSign} />
+        <StatCard label="Sales" value={currency(totalSales)} icon={TrendingUp} tone="emerald" />
+        <StatCard
+          label="ACoS"
+          value={totalSales > 0 ? `${((totalSpend / totalSales) * 100).toFixed(1)}%` : "—"}
+          icon={Percent}
+          tone={totalSpend / Math.max(totalSales, 1) > 0.35 ? "rose" : "cyan"}
+        />
+      </div>
+      <SectionCard
+        title="Targets by Spend"
+        subtitle={`${targets.length} targets · ${totalOrders} orders`}
+        right={
+          <ExportButton
+            filename="targeting.csv"
+            rows={targets}
+            columns={[
+              { key: "targeting", label: "Target" },
+              { key: "asin", label: "ASIN" },
+              { key: "campaign", label: "Campaign" },
+              { key: "clicks", label: "Clicks" },
+              { key: "spend", label: "Spend" },
+              { key: "sales", label: "Sales" },
+              { key: "orders", label: "Orders" },
+              { key: "acos", label: "ACoS %", accessor: (r) => Number((r.acos || 0).toFixed(2)) },
+              { key: "roas", label: "ROAS", accessor: (r) => Number((r.roas || 0).toFixed(2)) },
+            ]}
+          />
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                <th className="px-3 py-2">Target</th>
+                <th className="px-3 py-2 text-right">Clicks</th>
+                <th className="px-3 py-2 text-right">Spend</th>
+                <th className="px-3 py-2 text-right">Sales</th>
+                <th className="px-3 py-2 text-right">ACoS</th>
+                <th className="px-3 py-2 text-right">ROAS</th>
+                <th className="px-3 py-2 text-right">Recommendation</th>
+              </tr>
+            </thead>
+            <tbody>
+              {targets.slice(0, 100).map((t, i) => {
+                let rec = "Hold";
+                let recTone = "text-slate-300";
+                if (t.spend > 50 && t.orders === 0) { rec = "Pause / negate"; recTone = "text-rose-300"; }
+                else if (t.roas >= 4) { rec = "Increase bid 15%"; recTone = "text-emerald-300"; }
+                else if (t.roas > 0 && t.roas < 1) { rec = "Decrease bid 25%"; recTone = "text-amber-300"; }
+                return (
+                  <tr key={`${t.targeting}-${i}`} className="border-b border-slate-900 hover:bg-slate-900/30">
+                    <td className="px-3 py-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        {t.asin ? <AsinImage src={t.imageUrl} title={t.title} /> : null}
+                        <div className="min-w-0">
+                          <p className="truncate font-mono text-cyan-300">{t.targeting}</p>
+                          <p className="truncate text-xs text-slate-500">{t.campaign}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{t.clicks}</td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{currency(t.spend)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{currency(t.sales)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{t.acos > 0 ? `${t.acos.toFixed(1)}%` : "—"}</td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{t.roas > 0 ? t.roas.toFixed(2) : "—"}</td>
+                    <td className={cn("px-3 py-2 text-right text-xs", recTone)}>{rec}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// CATALOG PAGE (FSN port — product-level performance with FBM-only flag)
+// =============================================================================
+
+function CatalogPage({ spCampaigns = [], sbCampaigns = [], sdCampaigns = [], referenceByAsin, isFbmOnly }) {
+  const rows = useMemo(() => {
+    const byAsin = new Map();
+    const all = [...spCampaigns, ...sbCampaigns, ...sdCampaigns];
+    for (const c of all) {
+      const tgt = String(c.targeting || c.keyword || c.name || c.campaignName || "");
+      const m = tgt.match(/B0[A-Z0-9]{8}/);
+      const asin = c.asin || (m ? m[0] : null);
+      if (!asin) continue;
+      const cur = byAsin.get(asin) || { asin, impressions: 0, clicks: 0, spend: 0, sales: 0, orders: 0 };
+      cur.impressions += num(c.impressions);
+      cur.clicks += num(c.clicks);
+      cur.spend += num(c.spend);
+      cur.sales += num(c.sales);
+      cur.orders += num(c.orders);
+      byAsin.set(asin, cur);
+    }
+    const out = [];
+    for (const [asin, agg] of byAsin) {
+      const ref = (referenceByAsin && referenceByAsin.get && referenceByAsin.get(asin)) || {};
+      out.push({
+        ...agg,
+        title: ref.title || "",
+        shortTitle: ref.shortTitle || ref.title || "",
+        sku: ref.sku || "",
+        imageUrl: ref.imageUrl,
+        fbm: typeof isFbmOnly === "function" ? !!isFbmOnly(asin) : false,
+        acos: agg.spend > 0 && agg.sales > 0 ? (agg.spend / agg.sales) * 100 : 0,
+        roas: agg.spend > 0 ? agg.sales / agg.spend : 0,
+      });
+    }
+    out.sort((a, b) => b.spend - a.spend);
+    return out;
+  }, [spCampaigns, sbCampaigns, sdCampaigns, referenceByAsin, isFbmOnly]);
+
+  if (!rows.length) {
+    return (
+      <EmptyStateCard
+        title="Catalog"
+        icon={Boxes}
+        body="Per-ASIN ad performance with FBM-only flagging. Aggregates SP, SB, and SD spend/sales by ASIN and joins to item_data_reference for titles and images."
+        requiredSheets={[
+          "Sponsored Products Campaigns",
+          "Sponsored Brands Campaigns",
+          "Sponsored Display Campaigns",
+          "item_data_reference",
+          "FBM_only",
+        ]}
+      />
+    );
+  }
+  const totalSpend = rows.reduce((s, r) => s + r.spend, 0);
+  const totalSales = rows.reduce((s, r) => s + r.sales, 0);
+  const fbmCount = rows.filter((r) => r.fbm).length;
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <CountCard label="ASINs Advertised" value={rows.length} icon={Boxes} />
+        <CountCard label="FBM-only ASINs" value={fbmCount} icon={Tags} tone="amber" />
+        <StatCard label="Spend" value={currency(totalSpend)} icon={DollarSign} />
+        <StatCard label="Sales" value={currency(totalSales)} icon={TrendingUp} tone="emerald" />
+      </div>
+      <SectionCard
+        title="Catalog Performance"
+        subtitle={`${rows.length} ASINs · ${fbmCount} FBM-only`}
+        right={
+          <ExportButton
+            filename="catalog.csv"
+            rows={rows}
+            columns={[
+              { key: "asin", label: "ASIN" },
+              { key: "sku", label: "SKU" },
+              { key: "title", label: "Title" },
+              { key: "fbm", label: "FBM Only", accessor: (r) => (r.fbm ? "Y" : "N") },
+              { key: "clicks", label: "Clicks" },
+              { key: "spend", label: "Spend" },
+              { key: "sales", label: "Sales" },
+              { key: "orders", label: "Orders" },
+              { key: "acos", label: "ACoS %", accessor: (r) => Number((r.acos || 0).toFixed(2)) },
+              { key: "roas", label: "ROAS", accessor: (r) => Number((r.roas || 0).toFixed(2)) },
+            ]}
+          />
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                <th className="px-3 py-2">ASIN</th>
+                <th className="px-3 py-2 text-right">Clicks</th>
+                <th className="px-3 py-2 text-right">Spend</th>
+                <th className="px-3 py-2 text-right">Sales</th>
+                <th className="px-3 py-2 text-right">Orders</th>
+                <th className="px-3 py-2 text-right">ACoS</th>
+                <th className="px-3 py-2 text-right">ROAS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.slice(0, 200).map((r) => (
+                <tr key={r.asin} className="border-b border-slate-900 hover:bg-slate-900/30">
+                  <td className="px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <AsinImage src={r.imageUrl} title={r.shortTitle} />
+                      <div className="min-w-0">
+                        <p className="flex items-center gap-2 truncate font-mono text-cyan-300">
+                          {r.asin}
+                          {r.fbm && <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[10px] text-amber-300">FBM</span>}
+                        </p>
+                        <p className="truncate text-xs text-slate-500">{r.shortTitle}</p>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{r.clicks}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{currency(r.spend)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{currency(r.sales)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{r.orders}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{r.acos > 0 ? `${r.acos.toFixed(1)}%` : "—"}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{r.roas > 0 ? r.roas.toFixed(2) : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// WHAT CHANGED? PAGE — period-over-period sales/profit decomposition
+// =============================================================================
+
+function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin }) {
+  const [period, setPeriod] = useState("MoM");
+  const monthlyByAsin = useMemo(() => {
+    const map = new Map();
+    for (const r of settlementRows) {
+      const asin = r.asin || r.ASIN;
+      if (!asin) continue;
+      const dateStr = r.postedDate || r.posted_date || r.date;
+      const d = dateStr ? new Date(dateStr) : null;
+      if (!d || isNaN(d)) continue;
+      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const inner = map.get(asin) || new Map();
+      const cur = inner.get(ym) || { units: 0, sales: 0, refunds: 0, refundUnits: 0, fees: 0 };
+      const units = num(r.quantity || r.qty || r.units);
+      const amt = num(r.amount || r.total);
+      const type = String(r.transactionType || r.type || "").toLowerCase();
+      if (type.includes("refund")) {
+        cur.refunds += Math.abs(amt);
+        cur.refundUnits += Math.abs(units);
+      } else if (type.includes("order")) {
+        cur.units += units;
+        cur.sales += amt;
+      } else if (type.includes("fee")) {
+        cur.fees += Math.abs(amt);
+      }
+      inner.set(ym, cur);
+      map.set(asin, inner);
+    }
+    return map;
+  }, [settlementRows]);
+
+  const movers = useMemo(() => {
+    const out = [];
+    const allMonths = new Set();
+    for (const inner of monthlyByAsin.values()) for (const m of inner.keys()) allMonths.add(m);
+    const months = Array.from(allMonths).sort();
+    if (months.length < 2) return out;
+    const cur = months[months.length - 1];
+    const prev = months[months.length - 2];
+    for (const [asin, inner] of monthlyByAsin) {
+      const c = inner.get(cur) || { units: 0, sales: 0, refunds: 0, fees: 0 };
+      const p = inner.get(prev) || { units: 0, sales: 0, refunds: 0, fees: 0 };
+      const dSales = c.sales - p.sales;
+      const dUnits = c.units - p.units;
+      const aspCur = c.units > 0 ? c.sales / c.units : 0;
+      const aspPrev = p.units > 0 ? p.sales / p.units : 0;
+      const dAsp = aspCur - aspPrev;
+      const cogs = (cogsMap && cogsMap.get && cogsMap.get(asin)) || 0;
+      const cmCur = c.sales - c.refunds - c.fees - cogs * c.units;
+      const cmPrev = p.sales - p.refunds - p.fees - cogs * p.units;
+      const dCm = cmCur - cmPrev;
+      const ref = (referenceByAsin && referenceByAsin.get && referenceByAsin.get(asin)) || {};
+      let driver = "Mixed";
+      if (dUnits !== 0 || dAsp !== 0) {
+        if (Math.abs(dAsp * Math.max(c.units, 1)) > Math.abs(dUnits * Math.max(aspPrev, 1))) driver = "Price change";
+        else driver = dUnits < 0 ? "Volume drop" : "Volume gain";
+      }
+      out.push({
+        asin,
+        title: ref.shortTitle || ref.title || "",
+        imageUrl: ref.imageUrl,
+        prevSales: p.sales,
+        curSales: c.sales,
+        dSales,
+        dUnits,
+        dAsp,
+        dCm,
+        driver,
+        attribution: dSales >= 0
+          ? `Up ${currency(dSales)} - ${dUnits >= 0 ? "+" + dUnits : dUnits} units, ASP ${dAsp >= 0 ? "+" : ""}${currency(dAsp)}`
+          : `Down ${currency(Math.abs(dSales))} - ${dUnits} units, ASP ${dAsp >= 0 ? "+" : ""}${currency(dAsp)}`,
+        cmAttribution: dCm >= 0
+          ? `Up ${currency(dCm)} contribution`
+          : `Down ${currency(Math.abs(dCm))} contribution`,
+      });
+    }
+    return out;
+  }, [monthlyByAsin, cogsMap, referenceByAsin]);
+
+  if (!settlementRows.length) {
+    return (
+      <EmptyStateCard
+        title="What Changed?"
+        icon={Activity}
+        body="Per-ASIN week-over-week and month-over-month sales delta, decomposed into traffic, CVR, price, and OOS days. Profit decomposition attributes shifts to ad spend, fee creep, return rate, and margin."
+        requiredSheets={[
+          "amzsc_settlement_<YYYY>_<MM>",
+          "amzsc_traffic_<YYYY>_<MM>  (Detail Page Sales and Traffic by Child Item — for full traffic/CVR decomposition)",
+        ]}
+      />
+    );
+  }
+
+  const sortedBySales = [...movers].sort((a, b) => b.dSales - a.dSales);
+  const topGrowers = sortedBySales.filter((m) => m.dSales > 0).slice(0, 5);
+  const sortedByProfit = [...movers].sort((a, b) => a.dCm - b.dCm);
+  const topLeaks = sortedByProfit.filter((m) => m.dCm < 0).slice(0, 5);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-semibold text-white">What Changed?</h2>
+          <p className="text-sm text-slate-400">{period === "WoW" ? "Week over week" : "Month over month"} - based on settlement data.</p>
+        </div>
+        <TogglePills
+          value={period}
+          onChange={setPeriod}
+          options={[{ value: "WoW", label: "Week" }, { value: "MoM", label: "Month" }]}
+        />
+      </div>
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <SectionCard title="Top 5 Drivers of Growth" subtitle="Largest positive sales delta">
+          {topGrowers.length === 0 ? (
+            <p className="text-sm text-slate-400">No positive movers in the latest period.</p>
+          ) : (
+            <div className="space-y-2">
+              {topGrowers.map((m) => (
+                <div key={m.asin} className="rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-3">
+                  <div className="flex items-center gap-3">
+                    <AsinImage src={m.imageUrl} title={m.title} />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-mono text-cyan-300">{m.asin}</p>
+                      <p className="truncate text-xs text-slate-400">{m.title}</p>
+                    </div>
+                    <p className="font-mono text-emerald-300">{currency(m.dSales)}</p>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-300">{m.attribution}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </SectionCard>
+        <SectionCard title="Top 5 Profit Leaks" subtitle="Largest contribution-margin decline">
+          {topLeaks.length === 0 ? (
+            <p className="text-sm text-slate-400">No profit leaks detected.</p>
+          ) : (
+            <div className="space-y-2">
+              {topLeaks.map((m) => (
+                <div key={m.asin} className="rounded-2xl border border-rose-400/20 bg-rose-400/5 p-3">
+                  <div className="flex items-center gap-3">
+                    <AsinImage src={m.imageUrl} title={m.title} />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-mono text-cyan-300">{m.asin}</p>
+                      <p className="truncate text-xs text-slate-400">{m.title}</p>
+                    </div>
+                    <p className="font-mono text-rose-300">{currency(m.dCm)}</p>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-300">{m.cmAttribution}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </SectionCard>
+      </div>
+      <SectionCard
+        title="All Movers"
+        subtitle={`${movers.length} ASINs with period-over-period change`}
+        right={
+          <ExportButton
+            filename="what-changed.csv"
+            rows={movers}
+            columns={[
+              { key: "asin", label: "ASIN" },
+              { key: "title", label: "Title" },
+              { key: "prevSales", label: "Prev Sales" },
+              { key: "curSales", label: "Cur Sales" },
+              { key: "dSales", label: "Delta Sales" },
+              { key: "dUnits", label: "Delta Units" },
+              { key: "dAsp", label: "Delta ASP" },
+              { key: "dCm", label: "Delta Contribution" },
+              { key: "driver", label: "Driver" },
+            ]}
+          />
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                <th className="px-3 py-2">ASIN</th>
+                <th className="px-3 py-2 text-right">Δ Sales</th>
+                <th className="px-3 py-2 text-right">Δ Units</th>
+                <th className="px-3 py-2 text-right">Δ ASP</th>
+                <th className="px-3 py-2 text-right">Δ Contribution</th>
+                <th className="px-3 py-2 text-right">Driver</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...movers]
+                .sort((a, b) => Math.abs(b.dSales) - Math.abs(a.dSales))
+                .slice(0, 100)
+                .map((m) => (
+                  <tr key={m.asin} className="border-b border-slate-900 hover:bg-slate-900/30">
+                    <td className="px-3 py-2 font-mono text-cyan-300">{m.asin}</td>
+                    <td className={cn("px-3 py-2 text-right font-mono", m.dSales >= 0 ? "text-emerald-300" : "text-rose-300")}>{currency(m.dSales)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{m.dUnits}</td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{currency(m.dAsp)}</td>
+                    <td className={cn("px-3 py-2 text-right font-mono", m.dCm >= 0 ? "text-emerald-300" : "text-rose-300")}>{currency(m.dCm)}</td>
+                    <td className="px-3 py-2 text-right text-xs text-slate-300">{m.driver}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// ALERTS PAGE — six detection rules, grouped by severity
+// =============================================================================
+
+function AlertsPage({ settlementRows = [], inventoryByAsin = [], cogsMap, referenceByAsin }) {
+  const AD_SPEND_NO_ORDERS = 50;
+  const INVENTORY_DAYS = 14;
+  const RETURN_RATE_HIGH = 0.15;
+  const RETURN_RATE_BASE = 0.08;
+
+  const alerts = useMemo(() => {
+    const out = [];
+    for (const r of inventoryByAsin) {
+      if (r.daysOfCover != null && r.daysOfCover < INVENTORY_DAYS) {
+        const sev = r.daysOfCover < 7 ? "high" : "medium";
+        out.push({
+          rule: "Low inventory cover",
+          severity: sev,
+          asin: r.asin,
+          title: r.shortTitle,
+          imageUrl: r.imageUrl,
+          impact: `${Math.round(r.daysOfCover)} days of cover (${r.fbaUnits} FBA + ${r.awdUnits} AWD)`,
+          action: r.daysOfCover < 7 ? "Place replenishment order today - risk of stockout" : "Schedule shipment within the week",
+          dollarImpact: 0,
+        });
+      }
+    }
+    const monthlyByAsin = new Map();
+    for (const r of settlementRows) {
+      const asin = r.asin || r.ASIN;
+      if (!asin) continue;
+      const dateStr = r.postedDate || r.posted_date || r.date;
+      const d = dateStr ? new Date(dateStr) : null;
+      if (!d || isNaN(d)) continue;
+      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const inner = monthlyByAsin.get(asin) || new Map();
+      const cur = inner.get(ym) || { orders: 0, refunds: 0, sales: 0 };
+      const type = String(r.transactionType || r.type || "").toLowerCase();
+      const units = Math.abs(num(r.quantity || r.qty || r.units));
+      if (type.includes("refund")) cur.refunds += units;
+      else if (type.includes("order")) {
+        cur.orders += units;
+        cur.sales += num(r.amount || r.total);
+      }
+      inner.set(ym, cur);
+      monthlyByAsin.set(asin, inner);
+    }
+    for (const [asin, inner] of monthlyByAsin) {
+      const months = Array.from(inner.keys()).sort();
+      if (months.length < 2) continue;
+      const cur = inner.get(months[months.length - 1]);
+      const trailing = months.slice(-4, -1).map((m) => inner.get(m)).filter(Boolean);
+      const curRate = cur.orders > 0 ? cur.refunds / cur.orders : 0;
+      const trailingOrders = trailing.reduce((s, m) => s + m.orders, 0);
+      const trailingRefunds = trailing.reduce((s, m) => s + m.refunds, 0);
+      const trailingRate = trailingOrders > 0 ? trailingRefunds / trailingOrders : 0;
+      if (curRate > RETURN_RATE_HIGH && trailingRate < RETURN_RATE_BASE && cur.orders >= 5) {
+        const ref = (referenceByAsin && referenceByAsin.get && referenceByAsin.get(asin)) || {};
+        out.push({
+          rule: "Return rate spike",
+          severity: "high",
+          asin,
+          title: ref.shortTitle || ref.title,
+          imageUrl: ref.imageUrl,
+          impact: `${(curRate * 100).toFixed(1)}% returns this month vs ${(trailingRate * 100).toFixed(1)}% trailing 3M`,
+          action: "Audit listing photos, sizing, and recent reviews - quality or expectation mismatch likely",
+          dollarImpact: cur.refunds * (cur.sales / Math.max(cur.orders, 1)),
+        });
+      }
+    }
+    out.push({
+      rule: "CVR drop > 20% WoW",
+      severity: "low",
+      asin: null,
+      title: "Stub - traffic data not yet wired",
+      impact: "Pending amzsc_traffic_<YYYY>_<MM> tabs (need Sessions and Order Item Session %)",
+      action: "Populate traffic export tabs to enable detection",
+      dollarImpact: 0,
+      stub: true,
+    });
+    out.push({
+      rule: `Ad spend >= $${AD_SPEND_NO_ORDERS} with zero orders`,
+      severity: "low",
+      asin: null,
+      title: "Stub - requires per-ASIN ad spend rollup over a 30d window",
+      impact: "Wire products_30d / sales_monthly to enable",
+      action: "Once 30d ad rollup is live, this rule auto-activates",
+      dollarImpact: 0,
+      stub: true,
+    });
+    out.push({
+      rule: "Buy Box loss",
+      severity: "low",
+      asin: null,
+      title: "Stub - buy box data not yet wired",
+      impact: "Pending amzsc_buybox_<YYYY>_<MM> tabs",
+      action: "Populate buy box snapshot tabs to enable detection",
+      dollarImpact: 0,
+      stub: true,
+    });
+    out.push({
+      rule: "Price parity drift",
+      severity: "low",
+      asin: null,
+      title: "Stub - pricing snapshot not yet wired",
+      impact: "Pending pricing_snapshot_<YYYY>_<MM>_<DD> tabs",
+      action: "Populate pricing snapshots to enable detection",
+      dollarImpact: 0,
+      stub: true,
+    });
+    return out;
+  }, [settlementRows, inventoryByAsin, referenceByAsin]);
+
+  const high = alerts.filter((a) => a.severity === "high");
+  const medium = alerts.filter((a) => a.severity === "medium");
+  const low = alerts.filter((a) => a.severity === "low");
+
+  const renderGroup = (label, list, tone) => (
+    <SectionCard title={`${label} (${list.length})`}>
+      {list.length === 0 ? (
+        <p className="text-sm text-slate-400">No {label.toLowerCase()} alerts.</p>
+      ) : (
+        <div className="space-y-2">
+          {list.map((a, i) => (
+            <div
+              key={`${a.rule}-${a.asin || i}`}
+              className={cn(
+                "rounded-2xl border p-3",
+                tone === "rose" ? "border-rose-400/20 bg-rose-400/5"
+                  : tone === "amber" ? "border-amber-400/20 bg-amber-400/5"
+                  : "border-slate-800 bg-slate-900/40",
+                a.stub && "opacity-60"
+              )}
+            >
+              <div className="flex items-center gap-3">
+                {a.imageUrl ? <AsinImage src={a.imageUrl} title={a.title} /> : <AlertCircle className="h-6 w-6 text-slate-400" />}
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-white">{a.rule}{a.stub && " (stub)"}</p>
+                  {a.asin && <p className="truncate font-mono text-xs text-cyan-300">{a.asin} · {a.title}</p>}
+                  <p className="mt-1 text-xs text-slate-300">{a.impact}</p>
+                  <p className="mt-1 text-xs text-slate-400"><strong>Action:</strong> {a.action}</p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </SectionCard>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <CountCard label="High Severity" value={high.length} icon={AlertCircle} tone="rose" />
+        <CountCard label="Medium Severity" value={medium.length} icon={Bell} tone="amber" />
+        <CountCard label="Low Severity" value={low.length} icon={Bell} tone="slate" />
+      </div>
+      <div className="flex justify-end">
+        <ExportButton
+          filename="alerts.csv"
+          rows={alerts}
+          columns={[
+            { key: "rule", label: "Rule" },
+            { key: "severity", label: "Severity" },
+            { key: "asin", label: "ASIN" },
+            { key: "title", label: "Title" },
+            { key: "impact", label: "Impact" },
+            { key: "action", label: "Recommended Action" },
+          ]}
+        />
+      </div>
+      {renderGroup("High", high, "rose")}
+      {renderGroup("Medium", medium, "amber")}
+      {renderGroup("Low", low, "slate")}
+    </div>
+  );
+}
+
+// =============================================================================
+// SETTINGS PAGE
+// =============================================================================
+
+function SettingsPage({ channels = [], loadedMonthsByChannel = {}, cogsCount, fixedCostsCount, hasAdData, sheetId }) {
+  return (
+    <div className="space-y-6">
+      <SectionCard title="Workspace" subtitle="What this dashboard is currently reading from.">
+        <dl className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
+          <div>
+            <dt className="text-xs uppercase tracking-wider text-slate-500">Brand</dt>
+            <dd className="mt-1 text-white">Design Headquarters</dd>
+          </div>
+          <div>
+            <dt className="text-xs uppercase tracking-wider text-slate-500">Sheet ID</dt>
+            <dd className="mt-1 break-all font-mono text-cyan-300">{sheetId}</dd>
+          </div>
+          <div>
+            <dt className="text-xs uppercase tracking-wider text-slate-500">COGS rows</dt>
+            <dd className="mt-1 text-white">{cogsCount}</dd>
+          </div>
+          <div>
+            <dt className="text-xs uppercase tracking-wider text-slate-500">Fixed cost rows</dt>
+            <dd className="mt-1 text-white">{fixedCostsCount}</dd>
+          </div>
+          <div>
+            <dt className="text-xs uppercase tracking-wider text-slate-500">Ad data</dt>
+            <dd className="mt-1 text-white">{hasAdData ? "Loaded" : "Not loaded"}</dd>
+          </div>
+        </dl>
+      </SectionCard>
+      <SectionCard title="Channels" subtitle="From channel_config.">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {channels.map((c) => {
+            const months = loadedMonthsByChannel[c.code] || [];
+            return (
+              <div key={c.code} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-3">
+                <p className="text-sm font-medium text-white">{c.name}</p>
+                <p className="font-mono text-xs text-cyan-300">{c.code}</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  {c.enabled ? "enabled" : "disabled"} · {months.length} months loaded
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
