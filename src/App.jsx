@@ -226,9 +226,38 @@ async function fetchSettlementSheet(tabName) {
     "sessions",
     "ordered product sales",
   ];
-  // Try headers=0 first (auto-detects preamble rows as Amazon emits them),
-  // and if that doesn't match a header row, fall back to headers=1 (sheet
-  // already has headers in row 1, e.g. user pasted the data straight in).
+  // Hints that confirm a row of fetchSheet output looks like settlement/traffic data.
+  // If at least 2 of these keys are present in the first row, we know fetchSheet's
+  // headers=1 path correctly parsed the sheet. Otherwise we fall back to manual
+  // preamble-skipping detection (Amazon's stock export has 9 preamble rows).
+  const EXPECTED_KEYS = [
+    "type", "Type",
+    "sku", "SKU",
+    "quantity", "Quantity",
+    "product sales", "Product Sales",
+    "selling fees", "Selling Fees",
+    "fba fees", "FBA Fees",
+    "(Child) ASIN", "Child ASIN", "(Parent) ASIN",
+    "Sessions - Total", "Sessions",
+    "Ordered Product Sales",
+  ];
+
+  // Path 1: standard fetchSheet (headers=1) — works when the sheet has its
+  // real header in row 1 (no preamble). This is the case when a user pastes
+  // CSV-cleaned data directly into the tab.
+  try {
+    const standardRows = await fetchSheet(tabName);
+    if (standardRows && standardRows.length > 0) {
+      const first = standardRows[0] || {};
+      const matches = EXPECTED_KEYS.filter((k) => first[k] !== undefined).length;
+      if (matches >= 2) return standardRows;
+    }
+  } catch {
+    // fall through to manual detection
+  }
+
+  // Path 2: manual detection — handles Amazon's standard export (9-row preamble
+  // before the real header).
   const baseUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?sheet=${encodeURIComponent(tabName)}`;
   try {
     const res = await fetch(`${baseUrl}&headers=0&tq=${encodeURIComponent("select *")}`);
@@ -263,8 +292,7 @@ async function fetchSettlementSheet(tabName) {
       });
       if (dataRows.length > 0) return dataRows;
     }
-    // Fallback: try headers=1 — gviz column labels become the row keys.
-    return await fetchSheet(tabName);
+    return [];
   } catch {
     return [];
   }
@@ -2471,6 +2499,19 @@ export default function App() {
               fixedCostsCount={fixedCosts.length}
               hasAdData={!!(spCampaigns.length || sbCampaigns.length || sdCampaigns.length)}
               sheetId={SHEET_ID}
+              settlementByMonth={settlementByMonth}
+              trafficByMonth={trafficByMonth}
+              settlementRows={settlementRows}
+              spCampaignsCount={spCampaigns.length}
+              sbCampaignsCount={sbCampaigns.length}
+              sdCampaignsCount={sdCampaigns.length}
+              listingQualityCount={listingQualitySheet.length}
+              pricingSnapshotCount={pricingSnapshotSheet.length}
+              launchTrackerCount={launchTrackerSheet.length}
+              promotionsCount={promotionsSheet.length}
+              buyBoxByMonth={buyBoxByMonth}
+              inventoryFbaCount={inventoryFba.length}
+              inventoryAwdCount={inventoryAwd.length}
             />
           )}
         </main>
@@ -3792,7 +3833,48 @@ function AlertsPage({ settlementRows = [], inventoryByAsin = [], cogsMap, refere
 // SETTINGS PAGE
 // =============================================================================
 
-function SettingsPage({ channels = [], loadedMonthsByChannel = {}, cogsCount, fixedCostsCount, hasAdData, sheetId }) {
+function SettingsPage({
+  channels = [], loadedMonthsByChannel = {}, cogsCount, fixedCostsCount, hasAdData, sheetId,
+  settlementByMonth = {}, trafficByMonth = {}, settlementRows = [],
+  spCampaignsCount = 0, sbCampaignsCount = 0, sdCampaignsCount = 0,
+  listingQualityCount = 0, pricingSnapshotCount = 0, launchTrackerCount = 0,
+  promotionsCount = 0, buyBoxByMonth = {}, inventoryFbaCount = 0, inventoryAwdCount = 0,
+}) {
+  // Diagnostics: row count loaded per settlement / traffic month
+  const settlementRowsByMonth = useMemo(() => {
+    const map = {};
+    for (const [key, rows] of Object.entries(settlementByMonth)) {
+      const [, ym] = key.split("|");
+      map[ym] = (map[ym] || 0) + (rows ? rows.length : 0);
+    }
+    return map;
+  }, [settlementByMonth]);
+
+  const trafficRowsByMonth = useMemo(() => {
+    const map = {};
+    for (const [ym, rows] of Object.entries(trafficByMonth)) {
+      map[ym] = rows ? rows.length : 0;
+    }
+    return map;
+  }, [trafficByMonth]);
+
+  const buyBoxRowsByMonth = useMemo(() => {
+    const map = {};
+    for (const [ym, rows] of Object.entries(buyBoxByMonth)) {
+      map[ym] = rows ? rows.length : 0;
+    }
+    return map;
+  }, [buyBoxByMonth]);
+
+  const allMonths = useMemo(() => {
+    const set = new Set([
+      ...Object.keys(settlementRowsByMonth),
+      ...Object.keys(trafficRowsByMonth),
+      ...Object.keys(buyBoxRowsByMonth),
+    ]);
+    return Array.from(set).sort().reverse();
+  }, [settlementRowsByMonth, trafficRowsByMonth, buyBoxRowsByMonth]);
+
   return (
     <div className="space-y-6">
       <SectionCard title="Workspace" subtitle="What this dashboard is currently reading from.">
@@ -3817,8 +3899,148 @@ function SettingsPage({ channels = [], loadedMonthsByChannel = {}, cogsCount, fi
             <dt className="text-xs uppercase tracking-wider text-slate-500">Ad data</dt>
             <dd className="mt-1 text-white">{hasAdData ? "Loaded" : "Not loaded"}</dd>
           </div>
+          <div>
+            <dt className="text-xs uppercase tracking-wider text-slate-500">Settlement rows in active scope</dt>
+            <dd className={cn("mt-1", settlementRows.length > 0 ? "text-emerald-300" : "text-rose-300")}>
+              {settlementRows.length.toLocaleString()}
+            </dd>
+          </div>
         </dl>
       </SectionCard>
+
+      <SectionCard
+        title="Data Diagnostics — rows loaded per source"
+        subtitle="If P&L or other modules aren't populating, this is the first place to look. 0 rows = the gviz fetch returned empty for that tab."
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                <th className="px-3 py-2">Source</th>
+                <th className="px-3 py-2 text-right">Rows loaded</th>
+                <th className="px-3 py-2">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">cogs</td>
+                <td className="px-3 py-2 text-right font-mono">{cogsCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", cogsCount > 0 ? "text-emerald-300" : "text-rose-300")}>
+                  {cogsCount > 0 ? "Loaded" : "Empty / not fetched"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">fixed_costs_monthly</td>
+                <td className="px-3 py-2 text-right font-mono">{fixedCostsCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", fixedCostsCount > 0 ? "text-emerald-300" : "text-amber-300")}>
+                  {fixedCostsCount > 0 ? "Loaded" : "Empty — Personnel will show $0"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">Sponsored Products Campaigns</td>
+                <td className="px-3 py-2 text-right font-mono">{spCampaignsCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", spCampaignsCount > 0 ? "text-emerald-300" : "text-amber-300")}>
+                  {spCampaignsCount > 0 ? "Loaded" : "Empty"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">Sponsored Brands Campaigns</td>
+                <td className="px-3 py-2 text-right font-mono">{sbCampaignsCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", sbCampaignsCount > 0 ? "text-emerald-300" : "text-slate-400")}>
+                  {sbCampaignsCount > 0 ? "Loaded" : "Empty"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">Sponsored Display Campaigns</td>
+                <td className="px-3 py-2 text-right font-mono">{sdCampaignsCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", sdCampaignsCount > 0 ? "text-emerald-300" : "text-slate-400")}>
+                  {sdCampaignsCount > 0 ? "Loaded" : "Empty"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">inventory_fba</td>
+                <td className="px-3 py-2 text-right font-mono">{inventoryFbaCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", inventoryFbaCount > 0 ? "text-emerald-300" : "text-amber-300")}>
+                  {inventoryFbaCount > 0 ? "Loaded" : "Empty"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">inventory_awd</td>
+                <td className="px-3 py-2 text-right font-mono">{inventoryAwdCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", inventoryAwdCount > 0 ? "text-emerald-300" : "text-slate-400")}>
+                  {inventoryAwdCount > 0 ? "Loaded" : "Empty"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">listing_quality</td>
+                <td className="px-3 py-2 text-right font-mono">{listingQualityCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", listingQualityCount > 0 ? "text-emerald-300" : "text-slate-400")}>
+                  {listingQualityCount > 0 ? "Loaded" : "Empty"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">pricing_snapshot</td>
+                <td className="px-3 py-2 text-right font-mono">{pricingSnapshotCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", pricingSnapshotCount > 0 ? "text-emerald-300" : "text-slate-400")}>
+                  {pricingSnapshotCount > 0 ? "Loaded" : "Empty"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">launch_tracker</td>
+                <td className="px-3 py-2 text-right font-mono">{launchTrackerCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", launchTrackerCount > 0 ? "text-emerald-300" : "text-slate-400")}>
+                  {launchTrackerCount > 0 ? "Loaded" : "Empty"}
+                </td>
+              </tr>
+              <tr className="border-b border-slate-900">
+                <td className="px-3 py-2 text-white">promotions</td>
+                <td className="px-3 py-2 text-right font-mono">{promotionsCount.toLocaleString()}</td>
+                <td className={cn("px-3 py-2 text-xs", promotionsCount > 0 ? "text-emerald-300" : "text-slate-400")}>
+                  {promotionsCount > 0 ? "Loaded" : "Empty"}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="Monthly tabs"
+        subtitle="Per-month row counts for settlement, traffic, and buy-box. 0 rows on a month means that tab is empty or the gviz fetch failed."
+      >
+        {allMonths.length === 0 ? (
+          <p className="text-sm text-slate-400">No monthly tabs loaded yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                  <th className="px-3 py-2">Month</th>
+                  <th className="px-3 py-2 text-right">Settlement rows</th>
+                  <th className="px-3 py-2 text-right">Traffic rows</th>
+                  <th className="px-3 py-2 text-right">Buy box rows</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allMonths.map((ym) => {
+                  const s = settlementRowsByMonth[ym] || 0;
+                  const t = trafficRowsByMonth[ym] || 0;
+                  const b = buyBoxRowsByMonth[ym] || 0;
+                  return (
+                    <tr key={ym} className="border-b border-slate-900">
+                      <td className="px-3 py-2 font-mono text-cyan-300">{ymToShort(ym)}</td>
+                      <td className={cn("px-3 py-2 text-right font-mono", s > 0 ? "text-emerald-300" : "text-rose-300")}>{s.toLocaleString()}</td>
+                      <td className={cn("px-3 py-2 text-right font-mono", t > 0 ? "text-emerald-300" : "text-slate-500")}>{t.toLocaleString()}</td>
+                      <td className={cn("px-3 py-2 text-right font-mono", b > 0 ? "text-emerald-300" : "text-slate-500")}>{b.toLocaleString()}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SectionCard>
+
       <SectionCard title="Channels" subtitle="From channel_config.">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {channels.map((c) => {
