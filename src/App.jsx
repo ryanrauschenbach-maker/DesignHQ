@@ -221,16 +221,22 @@ async function fetchSettlementSheet(tabName) {
     "selling fees",
     "fba fees",
     "order id",
+    "(child) asin",
+    "child asin",
+    "sessions",
+    "ordered product sales",
   ];
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?sheet=${encodeURIComponent(
-    tabName
-  )}&headers=0&tq=${encodeURIComponent("select *")}`;
+  // Try headers=0 first (auto-detects preamble rows as Amazon emits them),
+  // and if that doesn't match a header row, fall back to headers=1 (sheet
+  // already has headers in row 1, e.g. user pasted the data straight in).
+  const baseUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?sheet=${encodeURIComponent(tabName)}`;
   try {
-    const res = await fetch(url);
+    const res = await fetch(`${baseUrl}&headers=0&tq=${encodeURIComponent("select *")}`);
     if (!res.ok) return [];
     const text = await res.text();
     const start = text.indexOf("(");
     const end = text.lastIndexOf(")");
+    if (start < 0 || end < 0) return [];
     const json = JSON.parse(text.slice(start + 1, end));
     const allRows = (json.table?.rows || []).map(
       (r) => (r.c || []).map((cell) => (cell ? cell.v : null))
@@ -246,18 +252,19 @@ async function fetchSettlementSheet(tabName) {
         break;
       }
     }
-    if (headerIdx === -1) {
-      return parseGviz(text);
-    }
-
-    const headers = (allRows[headerIdx] || []).map((v) => String(v ?? "").trim());
-    return allRows.slice(headerIdx + 1).map((row) => {
-      const obj = {};
-      headers.forEach((h, i) => {
-        if (h) obj[h] = row[i] ?? null;
+    if (headerIdx >= 0) {
+      const headers = (allRows[headerIdx] || []).map((v) => String(v ?? "").trim());
+      const dataRows = allRows.slice(headerIdx + 1).map((row) => {
+        const obj = {};
+        headers.forEach((h, i) => {
+          if (h) obj[h] = row[i] ?? null;
+        });
+        return obj;
       });
-      return obj;
-    });
+      if (dataRows.length > 0) return dataRows;
+    }
+    // Fallback: try headers=1 — gviz column labels become the row keys.
+    return await fetchSheet(tabName);
   } catch {
     return [];
   }
@@ -1417,6 +1424,13 @@ export default function App() {
   // amzsc Detail Page Sales and Traffic by Child Item — { yyyy-mm: rows[] }
   const [trafficByMonth, setTrafficByMonth] = useState({});
   const [settlementByMonth, setSettlementByMonth] = useState({});
+  // Stub-page data sources
+  const [listingQualitySheet, setListingQualitySheet] = useState([]);
+  const [pricingSnapshotSheet, setPricingSnapshotSheet] = useState([]);
+  const [pricingSnapshotTabName, setPricingSnapshotTabName] = useState("");
+  const [launchTrackerSheet, setLaunchTrackerSheet] = useState([]);
+  const [promotionsSheet, setPromotionsSheet] = useState([]);
+  const [buyBoxByMonth, setBuyBoxByMonth] = useState({});
 
   useEffect(() => {
     async function load() {
@@ -1516,6 +1530,46 @@ export default function App() {
           if (rows && rows.length) trafficMap[ym] = rows;
         }
         setTrafficByMonth(trafficMap);
+
+        // Buy box exports — monthly, same parser path.
+        const buyBoxResults = await Promise.all(
+          months.map(async (ym) => ({
+            ym,
+            rows: await fetchSettlementSheet(`amzsc_buybox_${ym}`),
+          }))
+        );
+        const buyBoxMap = {};
+        for (const { ym, rows } of buyBoxResults) {
+          if (rows && rows.length) buyBoxMap[ym] = rows;
+        }
+        setBuyBoxByMonth(buyBoxMap);
+
+        // Listing quality + launch tracker + promotions — single sheets.
+        const [lq, lt, promo] = await Promise.all([
+          safe("listing_quality"),
+          safe("launch_tracker"),
+          safe("promotions"),
+        ]);
+        setListingQualitySheet(lq);
+        setLaunchTrackerSheet(lt);
+        setPromotionsSheet(promo);
+
+        // Pricing snapshot — try a single canonical tab first, then walk back
+        // a small number of recent dates if not found. User keeps a daily or
+        // weekly snapshot tab named pricing_snapshot[_<YYYY>_<MM>_<DD>].
+        let snapshot = await safe("pricing_snapshot");
+        let snapshotName = snapshot && snapshot.length ? "pricing_snapshot" : "";
+        if (!snapshot || !snapshot.length) {
+          const today = new Date();
+          for (let i = 0; i < 14; i++) {
+            const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+            const tab = `pricing_snapshot_${d.getFullYear()}_${pad2(d.getMonth() + 1)}_${pad2(d.getDate())}`;
+            const rows = await safe(tab);
+            if (rows && rows.length) { snapshot = rows; snapshotName = tab; break; }
+          }
+        }
+        setPricingSnapshotSheet(snapshot || []);
+        setPricingSnapshotTabName(snapshotName);
 
         setError("");
       } catch (e) {
@@ -2366,86 +2420,46 @@ export default function App() {
             </>
           )}
 
-          {/* ===================== STUB MODULES ===================== */}
+          {/* ===================== BUY BOX ===================== */}
           {activeTab === "buyBox" && (
-            <EmptyStateCard
-              title="Buy Box Monitor"
-              icon={ShoppingBag}
-              body="Track % time held buy box / featured offer per ASIN, ASINs that lost the buy box in the last 7 days, and competitors who outbid you. Coming online once the buy-box report tabs are populated."
-              requiredSheets={[
-                "amzsc_buybox_<YYYY>_<MM>",
-                "amzvc_buybox_<YYYY>_<MM> (when Vendor Central is added)",
-                "wmt3p_featured_<YYYY>_<MM> (Walmart equivalent)",
-              ]}
-            />
+            <BuyBoxPage buyBoxByMonth={buyBoxByMonth} referenceByAsin={referenceByAsin} />
           )}
 
+          {/* ===================== LISTING QUALITY ===================== */}
           {activeTab === "listingQuality" && (
-            <EmptyStateCard
-              title="Listing Quality Scorecard"
-              icon={FileText}
-              body="One-time audit checklist per ASIN per channel: title compliance, ≥5 bullets, ≥1500 char description, A+ content live, ≥6 images, primary image white background, video, backend keywords, all variation children populated. Ranks issues by sales impact and produces a content punch list."
-              requiredSheets={[
-                "listing_quality (audit columns: sku, asin, channel, has_title, bullet_count, has_aplus, image_count, has_video, ...)",
-              ]}
-            />
+            <ListingQualityPage rows={listingQualitySheet} activeScope={activeScope} />
           )}
 
+          {/* ===================== RETURNS ===================== */}
           {activeTab === "returns" && (
-            <EmptyStateCard
-              title="Returns Dashboard"
-              icon={RefreshCw}
-              body="Return rate per ASIN, return $ as % of revenue, reason-code breakdown when available, and an alert for ASINs whose return rate is trending up. Also pulls in negative review velocity if available — paired data catches quality issues fastest."
-              requiredSheets={[
-                "amzsc_returns_<YYYY>_<MM>",
-                "review_velocity (optional, weekly snapshot per ASIN)",
-              ]}
-            />
+            <ReturnsPage settlementRows={settlementRows} cogsMap={cogsMap} referenceByAsin={referenceByAsin} />
           )}
 
+          {/* ===================== LAUNCH TRACKER ===================== */}
           {activeTab === "launchTracker" && (
-            <EmptyStateCard
-              title="Launch Tracker"
-              icon={Rocket}
-              body="Phase 1: launch checklist per new ASIN (listing live, A+ approved, photography done, campaigns built, vine reviews requested). Phase 2: post-launch metrics tracked against benchmarks (units day 30 / 60 / 90, BSR trajectory, review velocity, ROAS). Includes a small-multiples chart overlaying every recent launch on a 'days since launch' axis."
-              requiredSheets={[
-                "launch_tracker (sku, asin, channel, launch_date, checklist_status_*, ...)",
-              ]}
-            />
+            <LaunchTrackerPage rows={launchTrackerSheet} settlementRows={settlementRows} referenceByAsin={referenceByAsin} />
           )}
 
+          {/* ===================== PRICING PARITY ===================== */}
           {activeTab === "pricingParity" && (
-            <EmptyStateCard
-              title="Pricing Parity Monitor"
-              icon={Tags}
-              body="Detect MAP / parity drift across channels and third-party undercutting on Amazon. One row per SKU with a column per channel; flags rows out of parity above a tolerance you set."
-              requiredSheets={[
-                "pricing_snapshot_<YYYY>_<MM>_<DD> (sku, channel, price, sale_price, snapshot_date)",
-              ]}
-            />
+            <PricingParityPage rows={pricingSnapshotSheet} snapshotName={pricingSnapshotTabName} channels={channels} />
           )}
 
+          {/* ===================== CHANNEL COMPARISON ===================== */}
           {activeTab === "channelComparison" && (
-            <EmptyStateCard
-              title="Channel Comparison"
-              icon={Globe}
-              body="Once the P&L module has at least two channels populated, this view lights up automatically — revenue, profit, margin, ad efficiency, and inventory turn side-by-side per channel."
-              requiredSheets={[
-                "Already-defined sheets — auto-populates once a second channel has settlement data loaded.",
-              ]}
+            <ChannelComparisonPage
+              settlementByMonth={settlementByMonth}
+              cogsMap={cogsMap}
+              fixedCosts={fixedCosts}
+              channels={channels}
+              activeScope={activeScope}
+              pnlPeriod={pnlPeriod}
             />
           )}
 
+          {/* ===================== PROMOTIONS & FEES ===================== */}
           {activeTab === "promotionsFees" && (
-            <EmptyStateCard
-              title="Promotions & Fees"
-              icon={Receipt}
-              body="Active deals (Lightning, Best, Coupon, Subscribe & Save), discount %, lift in units, and net effect on profit. Also a fee creep audit: storage, long-term storage, removal, customer return, and 'Other' fees as $ and % of revenue, month over month, so silent fee increases get caught."
-              requiredSheets={[
-                "promotions (deal_type, sku, start_date, end_date, discount_pct, ...)",
-                "Fee creep auto-derives from amzsc_settlement_* tabs once 6+ months are loaded.",
-              ]}
-            />
+            <PromotionsFeesPage promotions={promotionsSheet} settlementRows={settlementRows} />
           )}
 
           {/* ===================== SETTINGS ===================== */}
@@ -3820,6 +3834,976 @@ function SettingsPage({ channels = [], loadedMonthsByChannel = {}, cogsCount, fi
             );
           })}
         </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// LISTING QUALITY SCORECARD
+// =============================================================================
+
+function ListingQualityPage({ rows = [], activeScope = [] }) {
+  const audits = useMemo(() => {
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+    return rows.map((r) => {
+      const channel = normalizeText(pick(r, ["channel", "Channel"], ""));
+      const checks = {
+        title: !!pick(r, ["title_compliant"], false),
+        bullets: num(pick(r, ["bullet_count"], 0)) >= 5,
+        description: num(pick(r, ["description_length"], 0)) >= 1500,
+        aplus: !!pick(r, ["has_aplus"], false),
+        images: num(pick(r, ["image_count"], 0)) >= 6,
+        whiteBg: !!pick(r, ["image_main_white_bg"], false),
+        video: !!pick(r, ["has_video"], false),
+        backendKw: !!pick(r, ["backend_keywords_filled"], false),
+        variations: !!pick(r, ["variation_complete"], true),
+      };
+      const passed = Object.values(checks).filter(Boolean).length;
+      const total = Object.keys(checks).length;
+      const score = Math.round((passed / total) * 100);
+      return {
+        sku: normalizeText(pick(r, ["sku"], "")),
+        asin: normalizeText(pick(r, ["asin"], "")),
+        channel,
+        title: normalizeText(pick(r, ["title"], "")),
+        brand: normalizeText(pick(r, ["brand"], "")),
+        auditDate: normalizeText(pick(r, ["audit_date"], "")),
+        bulletCount: num(pick(r, ["bullet_count"], 0)),
+        descriptionLength: num(pick(r, ["description_length"], 0)),
+        imageCount: num(pick(r, ["image_count"], 0)),
+        units30d: num(pick(r, ["units_30d"], 0)),
+        revenue30d: num(pick(r, ["revenue_30d"], 0)),
+        priorityOverride: normalizeText(pick(r, ["priority_override"], "")),
+        checks,
+        passed,
+        total,
+        score,
+        failedChecks: Object.entries(checks).filter(([, v]) => !v).map(([k]) => k),
+      };
+    }).filter((a) => a.asin);
+  }, [rows]);
+
+  const filtered = useMemo(() => {
+    if (!activeScope.length) return audits;
+    return audits.filter((a) => !a.channel || activeScope.includes(a.channel));
+  }, [audits, activeScope]);
+
+  if (audits.length === 0) {
+    return (
+      <EmptyStateCard
+        title="Listing Quality Scorecard"
+        icon={FileText}
+        body="One-time audit checklist per ASIN per channel: title compliance, ≥5 bullets, ≥1500 char description, A+ content live, ≥6 images, primary image white background, video, backend keywords, all variation children populated. Ranks issues by sales impact and produces a content punch list."
+        requiredSheets={["listing_quality (40-column schema — see listing_quality_columns.xlsx)"]}
+      />
+    );
+  }
+
+  // Punch list: failing audits sorted by revenue impact
+  const punchList = [...filtered]
+    .filter((a) => a.passed < a.total)
+    .sort((a, b) => b.revenue30d - a.revenue30d);
+  const passing = filtered.filter((a) => a.passed === a.total).length;
+  const avgScore = filtered.length > 0 ? Math.round(filtered.reduce((s, a) => s + a.score, 0) / filtered.length) : 0;
+
+  // Per-check pass rate
+  const checkLabels = {
+    title: "Title compliant",
+    bullets: "≥5 bullets",
+    description: "≥1500 char description",
+    aplus: "A+ content live",
+    images: "≥6 images",
+    whiteBg: "Main image white bg",
+    video: "Video present",
+    backendKw: "Backend keywords filled",
+    variations: "Variations complete",
+  };
+  const checkStats = Object.keys(checkLabels).map((key) => {
+    const passed = filtered.filter((a) => a.checks[key]).length;
+    return { key, label: checkLabels[key], passed, total: filtered.length, rate: filtered.length ? (passed / filtered.length) * 100 : 0 };
+  });
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <CountCard label="ASINs Audited" value={filtered.length} icon={FileText} />
+        <CountCard label="Fully Passing" value={passing} icon={FileText} tone="emerald" />
+        <CountCard label="Need Fixes" value={punchList.length} icon={AlertTriangle} tone="amber" />
+        <StatCard label="Avg Score" value={`${avgScore}%`} icon={BarChart3} tone={avgScore >= 80 ? "emerald" : avgScore >= 60 ? "amber" : "rose"} />
+      </div>
+
+      <SectionCard title="Per-Check Pass Rate" subtitle="How many ASINs pass each individual check">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {checkStats.map((s) => (
+            <div key={s.key} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-white">{s.label}</p>
+                <p className={cn("font-mono text-sm", s.rate >= 80 ? "text-emerald-300" : s.rate >= 50 ? "text-amber-300" : "text-rose-300")}>
+                  {s.rate.toFixed(0)}%
+                </p>
+              </div>
+              <p className="mt-1 text-xs text-slate-400">{s.passed} / {s.total} passing</p>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                <div className={cn("h-full", s.rate >= 80 ? "bg-emerald-400" : s.rate >= 50 ? "bg-amber-400" : "bg-rose-400")} style={{ width: `${s.rate}%` }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="Punch List"
+        subtitle={`${punchList.length} ASINs with fixes needed, ranked by revenue impact`}
+        right={
+          <ExportButton
+            filename="listing-quality-punch-list.csv"
+            rows={punchList}
+            columns={[
+              { key: "asin", label: "ASIN" },
+              { key: "sku", label: "SKU" },
+              { key: "channel", label: "Channel" },
+              { key: "title", label: "Title" },
+              { key: "score", label: "Score %" },
+              { key: "failedChecks", label: "Failed Checks", accessor: (r) => r.failedChecks.map((k) => checkLabels[k]).join(" / ") },
+              { key: "revenue30d", label: "Revenue 30d" },
+              { key: "units30d", label: "Units 30d" },
+              { key: "priorityOverride", label: "Priority" },
+            ]}
+          />
+        }
+      >
+        {punchList.length === 0 ? (
+          <p className="text-sm text-emerald-300">All audited ASINs pass every check.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                  <th className="px-3 py-2">ASIN</th>
+                  <th className="px-3 py-2">Channel</th>
+                  <th className="px-3 py-2 text-right">Score</th>
+                  <th className="px-3 py-2">Failing Checks</th>
+                  <th className="px-3 py-2 text-right">Revenue 30d</th>
+                  <th className="px-3 py-2 text-right">Priority</th>
+                </tr>
+              </thead>
+              <tbody>
+                {punchList.slice(0, 200).map((a) => (
+                  <tr key={`${a.asin}-${a.channel}`} className="border-b border-slate-900 hover:bg-slate-900/30">
+                    <td className="px-3 py-2">
+                      <p className="font-mono text-cyan-300">{a.asin}</p>
+                      <p className="truncate text-xs text-slate-500" style={{ maxWidth: 280 }}>{a.title}</p>
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs text-slate-300">{a.channel || "—"}</td>
+                    <td className={cn("px-3 py-2 text-right font-mono", a.score >= 80 ? "text-emerald-300" : a.score >= 60 ? "text-amber-300" : "text-rose-300")}>{a.score}%</td>
+                    <td className="px-3 py-2 text-xs text-rose-300">
+                      {a.failedChecks.map((k) => checkLabels[k]).join(", ")}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{currency(a.revenue30d)}</td>
+                    <td className="px-3 py-2 text-right text-xs text-slate-300">{a.priorityOverride || (a.revenue30d > 5000 ? "high" : a.revenue30d > 1000 ? "medium" : "low")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// PRICING PARITY MONITOR
+// =============================================================================
+
+function PricingParityPage({ rows = [], snapshotName = "", channels = [] }) {
+  const TOLERANCE = 0.05; // 5% — flag prices outside this band of the median
+
+  const skuByChannel = useMemo(() => {
+    const map = new Map(); // sku -> { sku, title, prices: { channel: { price, sale_price, snapshot_date } } }
+    for (const r of rows || []) {
+      const sku = normalizeText(pick(r, ["sku", "SKU"], ""));
+      if (!sku) continue;
+      const channel = normalizeText(pick(r, ["channel", "Channel"], ""));
+      const price = num(pick(r, ["price", "Price"], 0));
+      const salePrice = num(pick(r, ["sale_price", "Sale Price"], 0));
+      const date = normalizeText(pick(r, ["snapshot_date", "Snapshot Date", "date"], ""));
+      const cur = map.get(sku) || { sku, title: normalizeText(pick(r, ["title", "Title"], "")), prices: {} };
+      cur.prices[channel || "unknown"] = { price, salePrice, date };
+      map.set(sku, cur);
+    }
+    return [...map.values()];
+  }, [rows]);
+
+  if (!rows || rows.length === 0) {
+    return (
+      <EmptyStateCard
+        title="Pricing Parity Monitor"
+        icon={Tags}
+        body={`Detect MAP / parity drift across channels and third-party undercutting. One row per SKU with a column per channel; flags any channel out of parity by more than ${(TOLERANCE * 100).toFixed(0)}%.`}
+        requiredSheets={[
+          "pricing_snapshot  (or pricing_snapshot_<YYYY>_<MM>_<DD>) with columns: sku, channel, price, sale_price, snapshot_date",
+        ]}
+      />
+    );
+  }
+
+  // Compute parity flags
+  const channelCodes = Array.from(new Set(skuByChannel.flatMap((r) => Object.keys(r.prices))));
+  const flagged = skuByChannel.map((row) => {
+    const prices = channelCodes.map((c) => row.prices[c]?.price || 0).filter((p) => p > 0);
+    if (prices.length < 2) return { ...row, drift: 0, outOfParity: false };
+    const median = [...prices].sort((a, b) => a - b)[Math.floor(prices.length / 2)];
+    const drift = Math.max(...prices.map((p) => Math.abs(p - median) / median));
+    return { ...row, median, drift, outOfParity: drift > TOLERANCE };
+  });
+
+  const flaggedRows = flagged.filter((r) => r.outOfParity).sort((a, b) => b.drift - a.drift);
+  const totalSkus = flagged.length;
+  const okCount = flagged.filter((r) => !r.outOfParity && Object.keys(r.prices).length >= 2).length;
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <CountCard label="SKUs in Snapshot" value={totalSkus} icon={Tags} />
+        <CountCard label="In Parity" value={okCount} icon={Tags} tone="emerald" />
+        <CountCard label="Out of Parity" value={flaggedRows.length} icon={AlertTriangle} tone="rose" />
+        <StatCard label="Snapshot" value={snapshotName || "—"} icon={Tags} />
+      </div>
+
+      <SectionCard
+        title="Out-of-Parity SKUs"
+        subtitle={`Flagged when any channel drifts > ${(TOLERANCE * 100).toFixed(0)}% from the median price`}
+        right={
+          <ExportButton
+            filename="pricing-parity.csv"
+            rows={flagged}
+            columns={[
+              { key: "sku", label: "SKU" },
+              { key: "title", label: "Title" },
+              ...channelCodes.map((c) => ({ key: c, label: `${c} price`, accessor: (r) => r.prices[c]?.price || "" })),
+              { key: "median", label: "Median" },
+              { key: "drift", label: "Max drift %", accessor: (r) => Number((r.drift * 100).toFixed(2)) },
+              { key: "outOfParity", label: "Flagged", accessor: (r) => r.outOfParity ? "Y" : "N" },
+            ]}
+          />
+        }
+      >
+        {flaggedRows.length === 0 ? (
+          <p className="text-sm text-emerald-300">No SKUs out of parity in this snapshot.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                  <th className="px-3 py-2">SKU</th>
+                  {channelCodes.map((c) => <th key={c} className="px-3 py-2 text-right">{c}</th>)}
+                  <th className="px-3 py-2 text-right">Median</th>
+                  <th className="px-3 py-2 text-right">Drift</th>
+                </tr>
+              </thead>
+              <tbody>
+                {flaggedRows.slice(0, 200).map((row) => (
+                  <tr key={row.sku} className="border-b border-slate-900 hover:bg-slate-900/30">
+                    <td className="px-3 py-2">
+                      <p className="font-mono text-cyan-300">{row.sku}</p>
+                      <p className="truncate text-xs text-slate-500" style={{ maxWidth: 280 }}>{row.title}</p>
+                    </td>
+                    {channelCodes.map((c) => {
+                      const p = row.prices[c]?.price || 0;
+                      const median = row.median || 0;
+                      const off = median > 0 ? Math.abs(p - median) / median > TOLERANCE : false;
+                      return (
+                        <td key={c} className={cn("px-3 py-2 text-right font-mono", p === 0 ? "text-slate-600" : off ? "text-rose-300" : "text-slate-300")}>
+                          {p > 0 ? currencyDetailed(p) : "—"}
+                        </td>
+                      );
+                    })}
+                    <td className="px-3 py-2 text-right font-mono text-white">{currencyDetailed(row.median || 0)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-rose-300">{(row.drift * 100).toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// RETURNS DASHBOARD
+// =============================================================================
+
+function ReturnsPage({ settlementRows = [], cogsMap, referenceByAsin }) {
+  const byAsin = useMemo(() => {
+    const map = new Map();
+    for (const r of settlementRows) {
+      const sku = r.sku;
+      if (!sku) continue;
+      const cogsEntry = cogsMap?.get?.(sku);
+      const asin = cogsEntry?.asin || "";
+      const ref = asin && referenceByAsin?.get ? referenceByAsin.get(asin) : null;
+      const cur = map.get(sku) || {
+        sku,
+        asin,
+        title: cogsEntry?.title || ref?.shortTitle || ref?.title || "",
+        imageUrl: ref?.imageUrl,
+        orders: 0,
+        units: 0,
+        revenue: 0,
+        refunds: 0,
+        refundUnits: 0,
+        refundDollars: 0,
+      };
+      if (r.type === "order") {
+        cur.orders += 1;
+        cur.units += Math.abs(r.quantity || 0);
+        cur.revenue += r.productSales || 0;
+      } else if (r.type === "refund") {
+        cur.refunds += 1;
+        cur.refundUnits += Math.abs(r.quantity || 0);
+        cur.refundDollars += Math.abs(r.productSales || 0);
+      }
+      map.set(sku, cur);
+    }
+    return [...map.values()].map((row) => ({
+      ...row,
+      returnRate: row.units > 0 ? row.refundUnits / row.units : 0,
+      revenuePct: row.revenue > 0 ? row.refundDollars / row.revenue : 0,
+    }));
+  }, [settlementRows, cogsMap, referenceByAsin]);
+
+  if (!settlementRows || settlementRows.length === 0) {
+    return (
+      <EmptyStateCard
+        title="Returns Dashboard"
+        icon={RefreshCw}
+        body="Return rate per SKU/ASIN, return $ as % of revenue, and an alert for ASINs whose return rate is trending up. Auto-derived from settlement data."
+        requiredSheets={["amzsc_settlement_<YYYY>_<MM>"]}
+      />
+    );
+  }
+
+  const totalUnits = byAsin.reduce((s, r) => s + r.units, 0);
+  const totalRefundUnits = byAsin.reduce((s, r) => s + r.refundUnits, 0);
+  const totalRevenue = byAsin.reduce((s, r) => s + r.revenue, 0);
+  const totalRefundDollars = byAsin.reduce((s, r) => s + r.refundDollars, 0);
+  const overallReturnRate = totalUnits > 0 ? totalRefundUnits / totalUnits : 0;
+  const overallRevenuePct = totalRevenue > 0 ? totalRefundDollars / totalRevenue : 0;
+
+  const sortedRows = [...byAsin]
+    .filter((r) => r.units >= 5)
+    .sort((a, b) => b.returnRate - a.returnRate);
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Overall Return Rate" value={`${(overallReturnRate * 100).toFixed(1)}%`} icon={RefreshCw} tone={overallReturnRate > 0.10 ? "rose" : "cyan"} />
+        <StatCard label="Refund $ / Revenue" value={`${(overallRevenuePct * 100).toFixed(1)}%`} icon={DollarSign} tone={overallRevenuePct > 0.10 ? "rose" : "cyan"} />
+        <CountCard label="Total Refund Units" value={totalRefundUnits} icon={RefreshCw} tone="amber" />
+        <StatCard label="Total Refund $" value={currency(totalRefundDollars)} icon={DollarSign} tone="rose" />
+      </div>
+
+      <SectionCard
+        title="Returns by SKU"
+        subtitle={`${sortedRows.length} SKUs with ≥5 orders, sorted by return rate`}
+        right={
+          <ExportButton
+            filename="returns-by-sku.csv"
+            rows={sortedRows}
+            columns={[
+              { key: "sku", label: "SKU" },
+              { key: "asin", label: "ASIN" },
+              { key: "title", label: "Title" },
+              { key: "units", label: "Units Sold" },
+              { key: "refundUnits", label: "Refund Units" },
+              { key: "returnRate", label: "Return Rate %", accessor: (r) => Number((r.returnRate * 100).toFixed(2)) },
+              { key: "revenue", label: "Revenue" },
+              { key: "refundDollars", label: "Refund $" },
+            ]}
+          />
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                <th className="px-3 py-2">SKU / ASIN</th>
+                <th className="px-3 py-2 text-right">Units</th>
+                <th className="px-3 py-2 text-right">Refunds</th>
+                <th className="px-3 py-2 text-right">Return Rate</th>
+                <th className="px-3 py-2 text-right">Refund $</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.slice(0, 200).map((r) => (
+                <tr key={r.sku} className="border-b border-slate-900 hover:bg-slate-900/30">
+                  <td className="px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {r.imageUrl ? <AsinImage src={r.imageUrl} title={r.title} /> : null}
+                      <div className="min-w-0">
+                        <p className="font-mono text-cyan-300">{r.sku}</p>
+                        <p className="truncate text-xs text-slate-500" style={{ maxWidth: 320 }}>{r.asin}{r.title ? " · " + r.title : ""}</p>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{r.units}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{r.refundUnits}</td>
+                  <td className={cn("px-3 py-2 text-right font-mono", r.returnRate > 0.15 ? "text-rose-300" : r.returnRate > 0.08 ? "text-amber-300" : "text-emerald-300")}>{(r.returnRate * 100).toFixed(1)}%</td>
+                  <td className="px-3 py-2 text-right font-mono text-rose-300">{currency(r.refundDollars)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// BUY BOX MONITOR
+// =============================================================================
+
+function BuyBoxPage({ buyBoxByMonth = {}, referenceByAsin }) {
+  const months = Object.keys(buyBoxByMonth).sort().reverse();
+  if (months.length === 0) {
+    return (
+      <EmptyStateCard
+        title="Buy Box Monitor"
+        icon={ShoppingBag}
+        body="% of time held buy box / featured offer per ASIN, ASINs that lost the buy box recently, and competitors who outbid you."
+        requiredSheets={[
+          "amzsc_buybox_<YYYY>_<MM>  with columns: ASIN, Buy Box %, Snapshot Date  (one row per ASIN per snapshot day or month)",
+        ]}
+      />
+    );
+  }
+  const latest = months[0];
+  const prev = months[1];
+  const parseRow = (r) => {
+    const asin = normalizeText(pick(r, ["ASIN", "asin", "(Child) ASIN", "Child ASIN"], "")).toUpperCase();
+    if (!asin) return null;
+    const pct = num(pick(r, ["Buy Box %", "Buy Box Percentage", "Featured Offer Percentage", "buy_box_pct"], 0));
+    return { asin, pct: pct > 1 ? pct / 100 : pct };
+  };
+  const latestRows = (buyBoxByMonth[latest] || []).map(parseRow).filter(Boolean);
+  const prevRows = prev ? (buyBoxByMonth[prev] || []).map(parseRow).filter(Boolean) : [];
+  const prevByAsin = new Map(prevRows.map((r) => [r.asin, r.pct]));
+
+  const enriched = latestRows.map((r) => {
+    const ref = referenceByAsin?.get?.(r.asin) || {};
+    const prevPct = prevByAsin.get(r.asin);
+    return {
+      ...r,
+      title: ref.shortTitle || ref.title || "",
+      imageUrl: ref.imageUrl,
+      prevPct,
+      delta: prevPct != null ? r.pct - prevPct : null,
+    };
+  });
+
+  const lost = enriched.filter((r) => r.delta != null && r.delta < -0.05).sort((a, b) => a.delta - b.delta);
+  const lowHolders = enriched.filter((r) => r.pct < 0.80).sort((a, b) => a.pct - b.pct);
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <CountCard label="ASINs Tracked" value={enriched.length} icon={ShoppingBag} />
+        <CountCard label="Lost Buy Box (>5pp)" value={lost.length} icon={AlertTriangle} tone="rose" />
+        <CountCard label="Holders < 80%" value={lowHolders.length} icon={ShoppingBag} tone="amber" />
+        <StatCard label="Latest Snapshot" value={ymToShort(latest)} icon={ShoppingBag} />
+      </div>
+
+      <SectionCard
+        title="Recent Buy Box Losses"
+        subtitle={prev ? `Comparing ${ymToShort(latest)} vs ${ymToShort(prev)}` : "Need a prior month for delta comparison"}
+      >
+        {lost.length === 0 ? (
+          <p className="text-sm text-emerald-300">No significant buy box drops.</p>
+        ) : (
+          <div className="space-y-2">
+            {lost.slice(0, 20).map((r) => (
+              <div key={r.asin} className="flex items-center justify-between rounded-2xl border border-rose-400/20 bg-rose-400/5 p-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <AsinImage src={r.imageUrl} title={r.title} />
+                  <div className="min-w-0">
+                    <p className="truncate font-mono text-cyan-300">{r.asin}</p>
+                    <p className="truncate text-xs text-slate-400">{r.title}</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className="font-mono text-white">{(r.pct * 100).toFixed(0)}% buy box</p>
+                  <p className="font-mono text-xs text-rose-300">{(r.delta * 100).toFixed(1)}pp vs prior</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </SectionCard>
+
+      <SectionCard
+        title="All ASINs"
+        subtitle={`${enriched.length} ASINs in latest snapshot`}
+        right={
+          <ExportButton
+            filename="buybox.csv"
+            rows={enriched}
+            columns={[
+              { key: "asin", label: "ASIN" },
+              { key: "title", label: "Title" },
+              { key: "pct", label: "Buy Box %", accessor: (r) => Number((r.pct * 100).toFixed(2)) },
+              { key: "prevPct", label: "Prior %", accessor: (r) => r.prevPct != null ? Number((r.prevPct * 100).toFixed(2)) : "" },
+              { key: "delta", label: "Delta pp", accessor: (r) => r.delta != null ? Number((r.delta * 100).toFixed(2)) : "" },
+            ]}
+          />
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                <th className="px-3 py-2">ASIN</th>
+                <th className="px-3 py-2 text-right">Buy Box %</th>
+                <th className="px-3 py-2 text-right">Prior %</th>
+                <th className="px-3 py-2 text-right">Δ pp</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...enriched].sort((a, b) => a.pct - b.pct).slice(0, 200).map((r) => (
+                <tr key={r.asin} className="border-b border-slate-900 hover:bg-slate-900/30">
+                  <td className="px-3 py-2 font-mono text-cyan-300">{r.asin}</td>
+                  <td className={cn("px-3 py-2 text-right font-mono", r.pct >= 0.95 ? "text-emerald-300" : r.pct >= 0.80 ? "text-amber-300" : "text-rose-300")}>{(r.pct * 100).toFixed(0)}%</td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-300">{r.prevPct != null ? `${(r.prevPct * 100).toFixed(0)}%` : "—"}</td>
+                  <td className={cn("px-3 py-2 text-right font-mono", r.delta == null ? "text-slate-500" : r.delta >= 0 ? "text-emerald-300" : "text-rose-300")}>
+                    {r.delta != null ? `${(r.delta * 100).toFixed(1)}pp` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// LAUNCH TRACKER
+// =============================================================================
+
+function LaunchTrackerPage({ rows = [], settlementRows = [], referenceByAsin }) {
+  const launches = useMemo(() => {
+    return (rows || []).map((r) => {
+      const asin = normalizeText(pick(r, ["asin", "ASIN"], "")).toUpperCase();
+      if (!asin) return null;
+      const launchDate = normalizeText(pick(r, ["launch_date", "Launch Date"], ""));
+      const ld = launchDate ? new Date(launchDate) : null;
+      const daysSinceLaunch = ld && !isNaN(ld) ? Math.floor((Date.now() - ld.getTime()) / 86400000) : null;
+      const ref = referenceByAsin?.get?.(asin) || {};
+      const checklist = {
+        listing: !!pick(r, ["listing_live", "checklist_listing_live"], false),
+        aplus: !!pick(r, ["aplus_approved", "checklist_aplus"], false),
+        photography: !!pick(r, ["photography_done", "checklist_photography"], false),
+        campaigns: !!pick(r, ["campaigns_built", "checklist_campaigns"], false),
+        vine: !!pick(r, ["vine_requested", "checklist_vine"], false),
+      };
+      const checklistPct = Object.values(checklist).filter(Boolean).length / Object.keys(checklist).length;
+      // Pull units sold for this ASIN by looking up by SKU through cogs (best effort).
+      const sku = normalizeText(pick(r, ["sku", "SKU"], ""));
+      let unitsTotal = 0;
+      let revenueTotal = 0;
+      for (const sr of settlementRows) {
+        if (sr.type !== "order") continue;
+        if (sku && sr.sku === sku) {
+          unitsTotal += Math.abs(sr.quantity || 0);
+          revenueTotal += sr.productSales || 0;
+        }
+      }
+      return {
+        asin,
+        sku,
+        title: ref.shortTitle || ref.title || normalizeText(pick(r, ["title", "Title"], "")),
+        imageUrl: ref.imageUrl,
+        channel: normalizeText(pick(r, ["channel", "Channel"], "")),
+        launchDate,
+        daysSinceLaunch,
+        checklist,
+        checklistPct,
+        unitsTotal,
+        revenueTotal,
+        notes: normalizeText(pick(r, ["notes", "Notes"], "")),
+      };
+    }).filter(Boolean);
+  }, [rows, settlementRows, referenceByAsin]);
+
+  if (launches.length === 0) {
+    return (
+      <EmptyStateCard
+        title="Launch Tracker"
+        icon={Rocket}
+        body="Per-ASIN launch checklist + post-launch units / revenue tracking. Best for ASINs in their first 90 days."
+        requiredSheets={[
+          "launch_tracker  with columns: sku, asin, channel, launch_date, listing_live, aplus_approved, photography_done, campaigns_built, vine_requested, notes",
+        ]}
+      />
+    );
+  }
+
+  const new30 = launches.filter((l) => l.daysSinceLaunch != null && l.daysSinceLaunch <= 30);
+  const new90 = launches.filter((l) => l.daysSinceLaunch != null && l.daysSinceLaunch <= 90);
+  const incomplete = launches.filter((l) => l.checklistPct < 1).sort((a, b) => a.checklistPct - b.checklistPct);
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <CountCard label="Active Launches" value={launches.length} icon={Rocket} />
+        <CountCard label="< 30 days" value={new30.length} icon={Rocket} tone="emerald" />
+        <CountCard label="< 90 days" value={new90.length} icon={Rocket} tone="cyan" />
+        <CountCard label="Incomplete Checklists" value={incomplete.length} icon={AlertTriangle} tone="amber" />
+      </div>
+
+      <SectionCard title="Open Checklists" subtitle="Items still on the launch punch list, lowest completion first">
+        {incomplete.length === 0 ? (
+          <p className="text-sm text-emerald-300">All tracked launches have completed checklists.</p>
+        ) : (
+          <div className="space-y-2">
+            {incomplete.slice(0, 20).map((l) => (
+              <div key={l.asin} className="rounded-2xl border border-amber-400/20 bg-amber-400/5 p-3">
+                <div className="flex items-center gap-3">
+                  <AsinImage src={l.imageUrl} title={l.title} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-cyan-300">{l.asin}</p>
+                    <p className="truncate text-xs text-slate-400">{l.title}</p>
+                  </div>
+                  <p className="font-mono text-amber-300">{Math.round(l.checklistPct * 100)}%</p>
+                </div>
+                <p className="mt-1 text-xs text-slate-400">
+                  Pending: {Object.entries(l.checklist).filter(([, v]) => !v).map(([k]) => k).join(", ") || "—"}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </SectionCard>
+
+      <SectionCard
+        title="Launch Performance"
+        subtitle="Units and revenue since launch (settlement-derived)"
+        right={
+          <ExportButton
+            filename="launch-tracker.csv"
+            rows={launches}
+            columns={[
+              { key: "asin", label: "ASIN" },
+              { key: "sku", label: "SKU" },
+              { key: "title", label: "Title" },
+              { key: "channel", label: "Channel" },
+              { key: "launchDate", label: "Launch Date" },
+              { key: "daysSinceLaunch", label: "Days Since Launch" },
+              { key: "checklistPct", label: "Checklist %", accessor: (r) => Math.round(r.checklistPct * 100) },
+              { key: "unitsTotal", label: "Units" },
+              { key: "revenueTotal", label: "Revenue" },
+            ]}
+          />
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                <th className="px-3 py-2">ASIN</th>
+                <th className="px-3 py-2">Launch Date</th>
+                <th className="px-3 py-2 text-right">Days Live</th>
+                <th className="px-3 py-2 text-right">Checklist</th>
+                <th className="px-3 py-2 text-right">Units</th>
+                <th className="px-3 py-2 text-right">Revenue</th>
+              </tr>
+            </thead>
+            <tbody>
+              {launches.slice(0, 200).map((l) => (
+                <tr key={l.asin} className="border-b border-slate-900 hover:bg-slate-900/30">
+                  <td className="px-3 py-2">
+                    <p className="font-mono text-cyan-300">{l.asin}</p>
+                    <p className="truncate text-xs text-slate-500" style={{ maxWidth: 280 }}>{l.title}</p>
+                  </td>
+                  <td className="px-3 py-2 font-mono text-slate-300">{l.launchDate || "—"}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{l.daysSinceLaunch != null ? l.daysSinceLaunch : "—"}</td>
+                  <td className={cn("px-3 py-2 text-right font-mono", l.checklistPct === 1 ? "text-emerald-300" : l.checklistPct >= 0.5 ? "text-amber-300" : "text-rose-300")}>
+                    {Math.round(l.checklistPct * 100)}%
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{l.unitsTotal}</td>
+                  <td className="px-3 py-2 text-right font-mono text-white">{currency(l.revenueTotal)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// CHANNEL COMPARISON
+// =============================================================================
+
+function ChannelComparisonPage({ settlementByMonth = {}, cogsMap, fixedCosts = [], channels = [], activeScope = [], pnlPeriod }) {
+  // Group settlement rows by channel for the active period.
+  const byChannel = useMemo(() => {
+    const out = {};
+    for (const [key, rows] of Object.entries(settlementByMonth)) {
+      const [channel, ym] = key.split("|");
+      if (pnlPeriod && ym !== pnlPeriod) continue;
+      const parsed = parseSettlementSheet(rows, ym);
+      if (!parsed.length) continue;
+      const adSpend = 0; // ad spend split-by-channel not yet tracked separately; brief flagged
+      const pnl = computePnLForPeriod(parsed, cogsMap, fixedCosts, adSpend, ym);
+      out[channel] = pnl;
+    }
+    return out;
+  }, [settlementByMonth, cogsMap, fixedCosts, pnlPeriod]);
+
+  const channelCodes = Object.keys(byChannel);
+  if (channelCodes.length < 1) {
+    return (
+      <EmptyStateCard
+        title="Channel Comparison"
+        icon={Globe}
+        body={`Side-by-side P&L per channel for the active period. ${pnlPeriod ? `Currently looking at ${ymToLabel(pnlPeriod)}.` : "Select a period in the P&L module."} Lights up automatically once 2+ channels have settlement data loaded for the same month.`}
+        requiredSheets={[
+          "Already-defined sheets — auto-populates once a second channel has settlement data loaded for the same month.",
+        ]}
+      />
+    );
+  }
+
+  const lineItems = ["sales", "refunds", "net_revenue", "total_cogs", "amazon_commissions", "outbound_fba", "advertising", "total_general", "gross_profit", "gross_margin", "net_profit", "net_margin"];
+  const labelFor = (id) => PNL_LINE_ITEMS.find((i) => i.id === id)?.label || id;
+  const isPctRow = (id) => !!PNL_LINE_ITEMS.find((i) => i.id === id)?.isPct;
+
+  return (
+    <div className="space-y-6">
+      <SectionCard
+        title={`Channel P&L Comparison · ${pnlPeriod ? ymToLabel(pnlPeriod) : "—"}`}
+        subtitle={`${channelCodes.length} channel${channelCodes.length === 1 ? "" : "s"} with data this period`}
+        right={
+          <ExportButton
+            filename="channel-comparison.csv"
+            rows={lineItems.map((id) => {
+              const r = { line_item: labelFor(id) };
+              for (const ch of channelCodes) r[ch] = byChannel[ch][id];
+              return r;
+            })}
+            columns={[
+              { key: "line_item", label: "Line Item" },
+              ...channelCodes.map((ch) => ({ key: ch, label: ch })),
+            ]}
+          />
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                <th className="px-3 py-2">Line Item</th>
+                {channelCodes.map((ch) => {
+                  const ce = channels.find((c) => c.code === ch);
+                  return (
+                    <th key={ch} className="px-3 py-2 text-right">
+                      <div>{ce?.name || ch}</div>
+                      <div className="font-mono text-[10px] text-slate-500">{ch}</div>
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {lineItems.map((id) => (
+                <tr key={id} className="border-b border-slate-900">
+                  <td className="px-3 py-2 text-slate-300">{labelFor(id)}</td>
+                  {channelCodes.map((ch) => {
+                    const v = byChannel[ch][id] || 0;
+                    return (
+                      <td key={ch} className="px-3 py-2 text-right font-mono text-white">
+                        {isPctRow(id) ? `${v.toFixed(1)}%` : currency(v)}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+// =============================================================================
+// PROMOTIONS & FEES
+// =============================================================================
+
+function PromotionsFeesPage({ promotions = [], settlementRows = [] }) {
+  const deals = useMemo(() => {
+    return (promotions || []).map((r) => ({
+      dealType: normalizeText(pick(r, ["deal_type", "Deal Type"], "")),
+      sku: normalizeText(pick(r, ["sku", "SKU"], "")),
+      asin: normalizeText(pick(r, ["asin", "ASIN"], "")),
+      startDate: normalizeText(pick(r, ["start_date", "Start Date"], "")),
+      endDate: normalizeText(pick(r, ["end_date", "End Date"], "")),
+      discountPct: num(pick(r, ["discount_pct", "Discount %"], 0)),
+      notes: normalizeText(pick(r, ["notes", "Notes"], "")),
+    })).filter((d) => d.sku || d.asin);
+  }, [promotions]);
+
+  const today = new Date();
+  const isActive = (d) => {
+    const s = d.startDate ? new Date(d.startDate) : null;
+    const e = d.endDate ? new Date(d.endDate) : null;
+    if (s && !isNaN(s) && s > today) return false;
+    if (e && !isNaN(e) && e < today) return false;
+    return true;
+  };
+  const active = deals.filter(isActive);
+
+  // Fee creep audit — month over month from settlement
+  const feeByMonth = useMemo(() => {
+    const map = new Map();
+    const FEE_BUCKETS = ["fba_storage_fees", "fba_inventory_fees", "fba_removal_fees", "fba_customer_return_fees", "other_fba_fees", "subscription_fee", "premium_services_fee", "amazon_commissions"];
+    for (const r of settlementRows) {
+      const ym = r.ym;
+      const inner = map.get(ym) || { ym, revenue: 0, fees: {} };
+      if (r.type === "order") inner.revenue += r.productSales || 0;
+      const cat = r.adjustmentCategory;
+      if (cat && FEE_BUCKETS.includes(cat)) {
+        inner.fees[cat] = (inner.fees[cat] || 0) + (r.total || 0);
+      } else if (r.type === "order" || r.type === "refund") {
+        inner.fees.amazon_commissions = (inner.fees.amazon_commissions || 0) + (r.sellingFees || 0);
+      }
+      map.set(ym, inner);
+    }
+    return [...map.values()].sort((a, b) => a.ym.localeCompare(b.ym));
+  }, [settlementRows]);
+
+  const hasData = deals.length > 0 || feeByMonth.length > 0;
+  if (!hasData) {
+    return (
+      <EmptyStateCard
+        title="Promotions & Fees"
+        icon={Receipt}
+        body="Active deals (Lightning, Best, Coupon, Subscribe & Save) and a fee creep audit MoM. Fee creep auto-derives from settlement once 2+ months are loaded."
+        requiredSheets={[
+          "promotions  with columns: deal_type, sku, asin, start_date, end_date, discount_pct, notes",
+          "amzsc_settlement_<YYYY>_<MM>  (you already have this)",
+        ]}
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <CountCard label="Active Deals" value={active.length} icon={Receipt} />
+        <CountCard label="All Deals (history)" value={deals.length} icon={Receipt} tone="slate" />
+        <CountCard label="Fee Months Tracked" value={feeByMonth.length} icon={Wallet} tone="cyan" />
+        <StatCard label="Latest Month" value={feeByMonth.length > 0 ? ymToShort(feeByMonth[feeByMonth.length - 1].ym) : "—"} icon={Wallet} />
+      </div>
+
+      <SectionCard title="Active Deals" subtitle={`${active.length} live as of today`}>
+        {active.length === 0 ? (
+          <p className="text-sm text-slate-400">No active promotions in the sheet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                  <th className="px-3 py-2">Deal Type</th>
+                  <th className="px-3 py-2">SKU / ASIN</th>
+                  <th className="px-3 py-2">Window</th>
+                  <th className="px-3 py-2 text-right">Discount</th>
+                  <th className="px-3 py-2">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {active.map((d, i) => (
+                  <tr key={i} className="border-b border-slate-900 hover:bg-slate-900/30">
+                    <td className="px-3 py-2 text-cyan-300">{d.dealType}</td>
+                    <td className="px-3 py-2 font-mono text-xs text-slate-300">{d.sku} {d.asin}</td>
+                    <td className="px-3 py-2 text-xs text-slate-400">{d.startDate} → {d.endDate}</td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{d.discountPct ? `${d.discountPct}%` : "—"}</td>
+                    <td className="px-3 py-2 text-xs text-slate-400">{d.notes}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SectionCard>
+
+      <SectionCard
+        title="Fee Creep Audit"
+        subtitle="Month-over-month fee dollars and as % of revenue, derived from settlement"
+        right={
+          <ExportButton
+            filename="fee-creep.csv"
+            rows={feeByMonth}
+            columns={[
+              { key: "ym", label: "Month" },
+              { key: "revenue", label: "Revenue" },
+              { key: "fba_storage_fees", label: "Storage", accessor: (r) => r.fees.fba_storage_fees || 0 },
+              { key: "fba_inventory_fees", label: "Inventory", accessor: (r) => r.fees.fba_inventory_fees || 0 },
+              { key: "fba_removal_fees", label: "Removal", accessor: (r) => r.fees.fba_removal_fees || 0 },
+              { key: "fba_customer_return_fees", label: "Customer Return", accessor: (r) => r.fees.fba_customer_return_fees || 0 },
+              { key: "other_fba_fees", label: "Other FBA", accessor: (r) => r.fees.other_fba_fees || 0 },
+              { key: "amazon_commissions", label: "Selling Fees", accessor: (r) => r.fees.amazon_commissions || 0 },
+            ]}
+          />
+        }
+      >
+        {feeByMonth.length === 0 ? (
+          <p className="text-sm text-slate-400">Need at least one settlement month to compute fee trend.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
+                  <th className="px-3 py-2">Month</th>
+                  <th className="px-3 py-2 text-right">Revenue</th>
+                  <th className="px-3 py-2 text-right">Storage</th>
+                  <th className="px-3 py-2 text-right">Inventory</th>
+                  <th className="px-3 py-2 text-right">Removal</th>
+                  <th className="px-3 py-2 text-right">Cust. Return</th>
+                  <th className="px-3 py-2 text-right">Other FBA</th>
+                  <th className="px-3 py-2 text-right">Selling Fees</th>
+                  <th className="px-3 py-2 text-right">Total Fees / Rev</th>
+                </tr>
+              </thead>
+              <tbody>
+                {feeByMonth.map((m) => {
+                  const totalFees = Object.values(m.fees).reduce((s, v) => s + Math.abs(v || 0), 0);
+                  const pct = m.revenue > 0 ? (totalFees / m.revenue) * 100 : 0;
+                  return (
+                    <tr key={m.ym} className="border-b border-slate-900 hover:bg-slate-900/30">
+                      <td className="px-3 py-2 font-mono text-cyan-300">{ymToShort(m.ym)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-white">{currency(m.revenue)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-white">{currency(m.fees.fba_storage_fees || 0)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-white">{currency(m.fees.fba_inventory_fees || 0)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-white">{currency(m.fees.fba_removal_fees || 0)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-white">{currency(m.fees.fba_customer_return_fees || 0)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-white">{currency(m.fees.other_fba_fees || 0)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-white">{currency(m.fees.amazon_commissions || 0)}</td>
+                      <td className={cn("px-3 py-2 text-right font-mono", pct > 30 ? "text-rose-300" : pct > 20 ? "text-amber-300" : "text-emerald-300")}>{pct.toFixed(1)}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </SectionCard>
     </div>
   );
