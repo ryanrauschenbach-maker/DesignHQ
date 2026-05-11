@@ -148,6 +148,17 @@ const PNL_LINE_ITEMS = [
   { id: "vine_enrollment_fee", label: "Amazon Vine Enrollment Fee" },
   { id: "other_fba_fees", label: "Other FBA Fees" },
   { id: "total_general", label: "Total General Expenses", emphasize: true, isTotal: true },
+  // Vendor Central deductions — populated from amzsc/amzvc settlement rows
+  // tagged type=Adjustment with descriptions matching MDF / Chargebacks / etc.
+  // Show $0 when no VC scope is active; live numbers when amzvc settlement
+  // contains adjustment rows for those categories.
+  { id: "section_vc_deductions", section: true, label: "Vendor Central Deductions" },
+  { id: "vc_mdf", label: "MDF (Marketing Development Funds)" },
+  { id: "vc_chargebacks", label: "Chargebacks" },
+  { id: "vc_coop", label: "Co-op Contributions" },
+  { id: "vc_shortages", label: "Shortages / Damage Claims" },
+  { id: "vc_other_deductions", label: "Other VC Deductions" },
+  { id: "total_vc_deductions", label: "Total VC Deductions", emphasize: true, isTotal: true },
   { id: "section_tax", section: true, label: "Sales Tax" },
   { id: "sales_tax_collected", label: "Sales Tax Collected" },
   { id: "marketplace_withheld_tax", label: "Marketplace Withheld Tax" },
@@ -440,6 +451,15 @@ const FEE_RULES = [
   [/customer return/, "fba_customer_return_fees"],
   [/inventory placement/, "fba_inventory_fees"],
   [/liquidation/, "liquidation"],
+  // Vendor Central deductions — entered manually as Adjustment rows in
+  // amzvc_settlement_<YYYY>_<MM>. Match common naming variants:
+  [/\bmdf\b|marketing development/, "vc_mdf"],
+  [/charge.?back/, "vc_chargebacks"],
+  [/\bco.?op\b|cooperative/, "vc_coop"],
+  [/shortage|short ship|damage claim|po damages/, "vc_shortages"],
+  [/\bdamages?\b/, "vc_shortages"],
+  [/price protection|price claim|toc\b|terms of co-?op/, "vc_other_deductions"],
+  [/vendor deduction|vc deduction|vendor adjustment/, "vc_other_deductions"],
 ];
 
 function categorizeAdjustment(description) {
@@ -652,8 +672,15 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
     p.subscription_fee +
     p.vine_enrollment_fee +
     p.other_fba_fees;
+  p.total_vc_deductions =
+    p.vc_mdf +
+    p.vc_chargebacks +
+    p.vc_coop +
+    p.vc_shortages +
+    p.vc_other_deductions;
   p.net_sales_tax = p.sales_tax_collected + p.marketplace_withheld_tax;
-  p.gross_profit = p.net_revenue + p.total_cogs + p.total_general;
+  // VC deductions are negative dollars (adjustments) so they're additive here
+  p.gross_profit = p.net_revenue + p.total_cogs + p.total_general + p.total_vc_deductions;
   p.gross_margin = p.net_revenue ? (p.gross_profit / p.net_revenue) * 100 : 0;
   p.net_profit = p.gross_profit + p.net_sales_tax + p.personnel;
   p.net_margin = p.net_revenue ? (p.net_profit / p.net_revenue) * 100 : 0;
@@ -1571,6 +1598,29 @@ export default function App() {
         for (const { channel, ym, rows } of settlementResults) {
           if (rows && rows.length) settlementMap[`${channel}|${ym}`] = rows;
         }
+
+        // Master settlement tabs — `<channelCode>_settlement` with no month suffix.
+        // Useful for channels where you maintain one big tab (e.g., Vendor Central
+        // PO exports). Rows are auto-bucketed into monthly slots using their
+        // `date/time` column. Falls back gracefully if a master tab is missing.
+        const masterResults = await Promise.all(
+          targetChannels.map(async (channel) => ({
+            channel,
+            rows: await safe(`${channel}_settlement`),
+          }))
+        );
+        for (const { channel, rows } of masterResults) {
+          if (!rows || rows.length === 0) continue;
+          for (const r of rows) {
+            const dateStr = pick(r, ["date/time", "Date/Time", "date", "Date", "PO Date", "po date", "order date", "Order Date", "Window End Date", "ship date", "Ship Date"], "");
+            const d = dateStr ? new Date(dateStr) : null;
+            if (!d || isNaN(d)) continue;
+            const ym = `${d.getFullYear()}_${pad2(d.getMonth() + 1)}`;
+            const key = `${channel}|${ym}`;
+            if (!settlementMap[key]) settlementMap[key] = [];
+            settlementMap[key].push(r);
+          }
+        }
         setSettlementByMonth(settlementMap);
 
         // Traffic exports — same monthly cadence, header-row auto-detect.
@@ -1670,6 +1720,17 @@ export default function App() {
   // catalog). Add a channel code here to apply the same filter elsewhere.
   const SHARED_ACCOUNT_CHANNELS = useMemo(() => new Set(["amzvc"]), []);
 
+  const cogsMap = useMemo(() => parseCogs(cogsSheet), [cogsSheet]);
+  // Secondary lookup by ASIN — used when settlement rows have ASIN but no
+  // internal SKU (Vendor Central Net PPM exports, Walmart, etc.).
+  const cogsByAsin = useMemo(() => {
+    const map = new Map();
+    for (const entry of cogsMap.values()) {
+      if (entry && entry.asin) map.set(String(entry.asin).trim().toUpperCase(), entry);
+    }
+    return map;
+  }, [cogsMap]);
+
   // Build an ASIN allowlist from cogs (covers cases where settlement rows have
   // ASIN but no Vendor SKU, e.g. Vendor Central Sales Diagnostic exports).
   const cogsAsinSet = useMemo(() => {
@@ -1703,17 +1764,6 @@ export default function App() {
     }
     return out;
   }, [settlementByMonth, activeScope, SHARED_ACCOUNT_CHANNELS, cogsMap, cogsAsinSet]);
-
-  const cogsMap = useMemo(() => parseCogs(cogsSheet), [cogsSheet]);
-  // Secondary lookup by ASIN — used when settlement rows have ASIN but no
-  // internal SKU (Vendor Central Net PPM exports, Walmart, etc.).
-  const cogsByAsin = useMemo(() => {
-    const map = new Map();
-    for (const entry of cogsMap.values()) {
-      if (entry && entry.asin) map.set(String(entry.asin).trim().toUpperCase(), entry);
-    }
-    return map;
-  }, [cogsMap]);
   const fixedCosts = useMemo(() => parseFixedCostsMonthly(fixedCostsSheet), [fixedCostsSheet]);
 
   const adSpendCurrentMonth = useMemo(
