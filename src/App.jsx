@@ -2264,34 +2264,124 @@ export default function App() {
           ) : null}
 
           {/* ===================== OVERVIEW ===================== */}
-          {activeTab === "overview" && (
+          {activeTab === "overview" && (() => {
+            // Pre-compute Overview data: monthly trend, top movers, top alerts
+            const monthlySalesByYm = {};
+            for (const r of settlementRows) {
+              if (r.type !== "order") continue;
+              monthlySalesByYm[r.ym] = (monthlySalesByYm[r.ym] || 0) + (r.productSales || 0);
+            }
+            const trendMonths = Object.keys(monthlySalesByYm).sort();
+            const trendValues = trendMonths.map((m) => monthlySalesByYm[m]);
+            const trendMax = Math.max(...trendValues, 1);
+            const latestSales = trendValues[trendValues.length - 1] || 0;
+            const priorSales = trendValues[trendValues.length - 2] || 0;
+            const momChange = priorSales > 0 ? ((latestSales - priorSales) / priorSales) * 100 : 0;
+
+            // Inventory urgency snapshot
+            const urgentInv = inventoryByAsin.filter((r) => r.urgency === "urgent").length;
+            const replenishInv = inventoryByAsin.filter((r) => r.urgency === "replenish").length;
+
+            // Quick health roll-up of every module
+            const moduleStatus = [
+              { name: "P&L", live: settlementRows.length > 0, detail: settlementRows.length > 0 ? `${settlementRows.length.toLocaleString()} rows · ${pnlPeriod ? ymToLabel(pnlPeriod) : "—"}` : "Add settlement data" },
+              { name: "Advertising", live: spCampaigns.length > 0 || sbCampaigns.length > 0 || sdCampaigns.length > 0, detail: `${spCampaigns.length + sbCampaigns.length + sdCampaigns.length} campaign rows` },
+              { name: "Campaign Trends", live: (spCampaigns7.length || spCampaigns60.length || sbCampaigns7.length || sbCampaigns60.length) > 0, detail: "7/30/60-day trend data" },
+              { name: "Targeting", live: spCampaigns.length > 0, detail: `${spCampaigns.length} SP rows` },
+              { name: "Search Terms", live: spSearchTerms.length > 0 || sbSearchTerms.length > 0, detail: `${spSearchTerms.length + sbSearchTerms.length} term rows` },
+              { name: "Inventory", live: inventoryByAsin.length > 0, detail: `${inventoryByAsin.length} ASINs tracked` },
+              { name: "Catalog", live: spCampaigns.length > 0 && itemRefSheet.length > 0, detail: `${itemRefSheet.length} ref rows` },
+              { name: "Listing Quality", live: listingQualitySheet.length > 0, detail: `${listingQualitySheet.length} audits` },
+              { name: "Returns", live: settlementRows.length > 0, detail: "Auto-derived from settlement" },
+              { name: "Launch Tracker", live: launchTrackerSheet.length > 0, detail: `${launchTrackerSheet.length} launches` },
+              { name: "Pricing Parity", live: pricingSnapshotSheet.length > 0, detail: pricingSnapshotTabName || "pricing_snapshot" },
+              { name: "Buy Box", live: Object.keys(buyBoxByMonth).length > 0, detail: `${Object.keys(buyBoxByMonth).length} months` },
+              { name: "Promotions & Fees", live: promotionsSheet.length > 0 || settlementRows.length > 0, detail: `${promotionsSheet.length} deals` },
+              { name: "What Changed", live: settlementRows.length > 0, detail: trafficByAsinByMonth.size > 0 ? "Full traffic decomposition" : "Settlement-only" },
+              { name: "Alerts", live: settlementRows.length > 0 || inventoryByAsin.length > 0, detail: "Auto-recomputed each load" },
+              { name: "Channel Comparison", live: Object.keys(loadedMonthsByChannel).length >= 2, detail: `${Object.keys(loadedMonthsByChannel).length} channels with data` },
+            ];
+
+            return (
             <div className="space-y-6">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <StatCard
                   label="Net Revenue (selected month)"
-                  value={pnl.net_revenue}
+                  value={pnl.net_revenue ? currency(pnl.net_revenue) : "$0"}
                   icon={DollarSign}
                   tone="cyan"
                 />
                 <StatCard
                   label="Gross Profit"
-                  value={pnl.gross_profit}
+                  value={pnl.gross_profit ? currency(pnl.gross_profit) : "$0"}
                   icon={TrendingUp}
                   tone={pnl.gross_profit >= 0 ? "emerald" : "rose"}
                 />
                 <StatCard
                   label="Net Profit"
-                  value={pnl.net_profit}
+                  value={pnl.net_profit ? currency(pnl.net_profit) : "$0"}
                   icon={Wallet}
                   tone={pnl.net_profit >= 0 ? "emerald" : "rose"}
                 />
                 <StatCard
                   label="Net Margin"
-                  value={pnl.net_margin}
-                  suffix="%"
+                  value={`${(pnl.net_margin || 0).toFixed(1)}%`}
                   icon={BarChart3}
                   tone={pnl.net_margin >= 10 ? "emerald" : pnl.net_margin >= 0 ? "amber" : "rose"}
                 />
+              </div>
+
+              {trendMonths.length >= 2 && (
+                <SectionCard
+                  title="Revenue Trend"
+                  subtitle={`Product sales by month — ${trendMonths.length} months in scope${momChange !== 0 ? `, MoM ${momChange >= 0 ? "+" : ""}${momChange.toFixed(1)}%` : ""}`}
+                >
+                  <div className="flex items-end justify-between gap-1 overflow-x-auto pb-2" style={{ minHeight: 140 }}>
+                    {trendMonths.map((ym, i) => {
+                      const v = trendValues[i];
+                      const h = Math.max(4, (v / trendMax) * 120);
+                      const isLatest = i === trendMonths.length - 1;
+                      return (
+                        <div key={ym} className="flex flex-1 min-w-[40px] flex-col items-center gap-1">
+                          <div className="text-[10px] font-mono text-slate-400">{currency(v)}</div>
+                          <div
+                            className={cn("w-full rounded-t", isLatest ? "bg-cyan-400" : "bg-slate-700")}
+                            style={{ height: `${h}px` }}
+                            title={`${ymToLabel(ym)}: ${currency(v)}`}
+                          />
+                          <div className="text-[10px] text-slate-500">{ymToShort(ym)}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </SectionCard>
+              )}
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs uppercase tracking-wider text-slate-500">Urgent Inventory</p>
+                    <AlertTriangle className="h-4 w-4 text-rose-300" />
+                  </div>
+                  <p className="mt-2 font-mono text-2xl text-white">{urgentInv}</p>
+                  <p className="text-xs text-slate-400">ASINs under 14 days of cover</p>
+                </div>
+                <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs uppercase tracking-wider text-slate-500">Replenish Watchlist</p>
+                    <Package className="h-4 w-4 text-amber-300" />
+                  </div>
+                  <p className="mt-2 font-mono text-2xl text-white">{replenishInv}</p>
+                  <p className="text-xs text-slate-400">ASINs under 60 days of cover</p>
+                </div>
+                <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs uppercase tracking-wider text-slate-500">Ad Spend (current)</p>
+                    <Megaphone className="h-4 w-4 text-cyan-300" />
+                  </div>
+                  <p className="mt-2 font-mono text-2xl text-white">{currency(adSpendCurrentMonth)}</p>
+                  <p className="text-xs text-slate-400">From SP/SB/SD campaigns in scope</p>
+                </div>
               </div>
 
               <SectionCard
@@ -2308,12 +2398,13 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
                     {enabledChannels.map((c) => {
                       const months = loadedMonthsByChannel[c.code] || [];
+                      const inScope = activeScope.includes(c.code);
                       return (
                         <div
                           key={c.code}
                           className={cn(
                             "rounded-2xl border p-4",
-                            c.code === activeScope[0]
+                            inScope
                               ? "border-cyan-400/40 bg-cyan-400/5"
                               : "border-slate-800 bg-slate-950"
                           )}
@@ -2333,23 +2424,29 @@ export default function App() {
 
               <SectionCard
                 title="Module Status"
-                subtitle="What's wired up vs. waiting on data."
+                subtitle="Live data status for every page. Green = receiving data; amber = needs sheet population."
               >
-                <ul className="space-y-2 text-sm">
-                  <li>
-                    ✅ <strong className="text-white">P&L</strong> — live for{" "}
-                    {pnlPeriod ? ymToLabel(pnlPeriod) : "no period yet"}
-                  </li>
-                  <li>
-                    ✅ <strong className="text-white">Advertising & Search Terms</strong> — live for Amazon Seller Central
-                  </li>
-                  <li>
-                    🟡 <strong className="text-white">What Changed, Alerts, Buy Box, Listing Quality, Returns, Launch Tracker, Pricing Parity, Channel Comparison, Promotions & Fees</strong> — pages exist, awaiting their respective sheet tabs.
-                  </li>
-                </ul>
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {moduleStatus.map((m) => (
+                    <div
+                      key={m.name}
+                      className={cn(
+                        "flex items-start gap-3 rounded-2xl border p-3",
+                        m.live ? "border-emerald-400/20 bg-emerald-400/5" : "border-amber-400/20 bg-amber-400/5"
+                      )}
+                    >
+                      <div className={cn("mt-0.5 h-2 w-2 flex-shrink-0 rounded-full", m.live ? "bg-emerald-400" : "bg-amber-400")} />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-white">{m.name}</p>
+                        <p className="text-xs text-slate-400">{m.detail}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </SectionCard>
             </div>
-          )}
+          );
+          })()}
 
           {/* ===================== WHAT CHANGED? ===================== */}
           {activeTab === "whatChanged" && (
@@ -5030,4 +5127,3 @@ function PromotionsFeesPage({ promotions = [], settlementRows = [] }) {
     </div>
   );
 }
-
