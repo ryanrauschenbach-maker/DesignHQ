@@ -691,7 +691,7 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
   // Wrapped defensively — any unexpected data shape leaves deductions at $0
   // rather than crashing the entire P&L render.
   try {
-    if (agreementsByChannel && typeof agreementsByChannel === "object") {
+    if (false && agreementsByChannel && typeof agreementsByChannel === "object") {
       for (const channel of Object.keys(agreementsByChannel)) {
         const channelSales = salesByChannel[channel] || 0;
         if (!channelSales || channelSales <= 0) continue;
