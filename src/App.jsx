@@ -675,25 +675,30 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
 
   // Apply per-channel agreement deductions (e.g., amzvc_agreements rows like
   // ["Freight Allowance", 0.03] become a 3%-of-VC-revenue deduction line).
-  if (agreementsByChannel) {
-    for (const channel of Object.keys(agreementsByChannel)) {
-      const channelSales = salesByChannel[channel] || 0;
-      if (channelSales <= 0) continue;
-      const agreements = agreementsByChannel[channel] || [];
-      for (const ag of agreements) {
-        const amt = -1 * Math.abs(ag.rate * channelSales);
-        // Per-agreement breakdown for the line-item display
-        p.agreement_deductions[ag.name] = (p.agreement_deductions[ag.name] || 0) + amt;
-        // Bucket into the right total via name keyword matching, or
-        // vc_other_deductions as the fallback bucket.
-        const nameLower = ag.name.toLowerCase();
-        if (/\bmdf\b|marketing development/.test(nameLower)) p.vc_mdf += amt;
-        else if (/charge.?back/.test(nameLower)) p.vc_chargebacks += amt;
-        else if (/\bco.?op\b|cooperative/.test(nameLower)) p.vc_coop += amt;
-        else if (/shortage|damage/.test(nameLower)) p.vc_shortages += amt;
-        else p.vc_other_deductions += amt;
+  // Wrapped defensively — any unexpected data shape leaves deductions at $0
+  // rather than crashing the entire P&L render.
+  try {
+    if (agreementsByChannel && typeof agreementsByChannel === "object") {
+      for (const channel of Object.keys(agreementsByChannel)) {
+        const channelSales = salesByChannel[channel] || 0;
+        if (!channelSales || channelSales <= 0) continue;
+        const agreements = agreementsByChannel[channel];
+        if (!Array.isArray(agreements)) continue;
+        for (const ag of agreements) {
+          if (!ag || typeof ag.rate !== "number" || !ag.name) continue;
+          const amt = -1 * Math.abs(ag.rate * channelSales);
+          p.agreement_deductions[ag.name] = (p.agreement_deductions[ag.name] || 0) + amt;
+          const nameLower = String(ag.name).toLowerCase();
+          if (/\bmdf\b|marketing development/.test(nameLower)) p.vc_mdf += amt;
+          else if (/charge.?back/.test(nameLower)) p.vc_chargebacks += amt;
+          else if (/\bco.?op\b|cooperative/.test(nameLower)) p.vc_coop += amt;
+          else if (/shortage|damage/.test(nameLower)) p.vc_shortages += amt;
+          else p.vc_other_deductions += amt;
+        }
       }
     }
+  } catch (e) {
+    // Swallow — agreements failure should never break the P&L
   }
 
   p.net_revenue = p.sales + p.shipping_promo + p.gift_wraps + p.refunds + p.reimbursements + p.liquidation;
@@ -1679,40 +1684,39 @@ export default function App() {
           }))
         );
         const agreementsMap = {};
-        for (const { channel, rows } of agreementResults) {
-          if (!rows || rows.length === 0) continue;
-          const list = [];
-          for (const r of rows) {
-            // Rows from fetchSheet are keyed by column LABEL. Without a real
-            // header row, gviz uses the first row's values as labels — so the
-            // first agreement becomes the label and we lose it. To handle
-            // both cases (header present vs not), iterate all keys and look
-            // for a numeric value.
-            const keys = Object.keys(r);
-            let name = null;
-            let rate = null;
-            for (const k of keys) {
-              const v = r[k];
-              if (v === null || v === undefined || v === "") continue;
-              const asNum = Number(v);
-              if (!isNaN(asNum) && Math.abs(asNum) > 0 && Math.abs(asNum) < 1.5) {
-                rate = asNum;
-              } else if (typeof v === "string" || (typeof v === "number" && !isFinite(asNum))) {
-                if (!name) name = String(v).trim();
+        try {
+          for (const { channel, rows } of agreementResults) {
+            if (!rows || rows.length === 0) continue;
+            const list = [];
+            for (const r of rows) {
+              if (!r || typeof r !== "object") continue;
+              const keys = Object.keys(r);
+              let name = null;
+              let rate = null;
+              for (const k of keys) {
+                const v = r[k];
+                if (v === null || v === undefined || v === "") continue;
+                const asNum = Number(v);
+                if (!isNaN(asNum) && Math.abs(asNum) > 0 && Math.abs(asNum) < 1.5) {
+                  rate = asNum;
+                } else if (typeof v === "string" || (typeof v === "number" && !isFinite(asNum))) {
+                  if (!name) name = String(v).trim();
+                }
+              }
+              // Also extract from gviz column labels (handles no-header case)
+              if (!name && keys.length >= 1 && keys[0]) name = String(keys[0]).trim();
+              if ((rate === null || rate === 0) && keys.length >= 2 && keys[1]) {
+                const v2 = Number(keys[1]);
+                if (!isNaN(v2) && v2 !== 0 && Math.abs(v2) < 1.5) rate = v2;
+              }
+              if (name && typeof rate === "number" && rate !== 0) {
+                list.push({ name, rate });
               }
             }
-            // Also include the gviz column label as a candidate name (handles
-            // the no-header case where first row got promoted to column label)
-            if (!name && keys.length >= 1) name = keys[0];
-            if (!rate && keys.length >= 2) {
-              const v2 = Number(keys[1]);
-              if (!isNaN(v2)) rate = v2;
-            }
-            if (name && typeof rate === "number" && rate !== 0) {
-              list.push({ name, rate });
-            }
+            if (list.length > 0) agreementsMap[channel] = list;
           }
-          if (list.length > 0) agreementsMap[channel] = list;
+        } catch (e) {
+          // Swallow — agreements failure should not block dashboard load
         }
         setAgreementsByChannel(agreementsMap);
 
