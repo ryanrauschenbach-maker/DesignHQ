@@ -1637,12 +1637,30 @@ export default function App() {
             settlementPairs.push({ channel, ym });
           }
         }
-        const settlementResults = await Promise.all(
-          settlementPairs.map(async ({ channel, ym }) => ({
+        // Throttle to ~6 concurrent gviz calls so we don't trigger 429 / 503
+        // floods (gviz aggressively rate-limits parallel reads on large sheets).
+        const runWithConcurrency = async (items, limit, worker) => {
+          const out = new Array(items.length);
+          let cursor = 0;
+          const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+            while (true) {
+              const i = cursor++;
+              if (i >= items.length) return;
+              try { out[i] = await worker(items[i]); }
+              catch { out[i] = null; }
+            }
+          });
+          await Promise.all(workers);
+          return out;
+        };
+        const settlementResults = await runWithConcurrency(
+          settlementPairs,
+          6,
+          async ({ channel, ym }) => ({
             channel,
             ym,
             rows: await fetchSettlementSheet(`${channel}_settlement_${ym}`),
-          }))
+          })
         );
         const settlementMap = {};
         for (const { channel, ym, rows } of settlementResults) {
@@ -2265,15 +2283,9 @@ export default function App() {
     { id: "settings", label: "Settings", icon: SettingsIcon },
   ];
 
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-white">
-        Loading Google Sheets data...
-      </div>
-    );
-  }
-
   // Period options = union of months across every channel currently in scope.
+  // Must come BEFORE any early-return so React's hook ordering stays stable
+  // between loading=true and loading=false renders. (Was breaking with #310.)
   const periodOptions = useMemo(() => {
     const set = new Set();
     for (const c of activeScope) {
@@ -2284,6 +2296,14 @@ export default function App() {
       label: ymToLabel(ym),
     }));
   }, [activeScope, loadedMonthsByChannel]);
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-white">
+        Loading Google Sheets data...
+      </div>
+    );
+  }
 
   const channelOptions = enabledChannels.length
     ? enabledChannels.map((c) => ({ value: c.code, label: c.name }))
