@@ -473,12 +473,19 @@ function categorizeAdjustment(description) {
 function parseSettlementSheet(rows, ym) {
   if (!Array.isArray(rows) || rows.length === 0) return [];
   return rows.map((r) => {
-    const type = normalizeText(pick(r, ["type", "Type"], "")).toLowerCase();
-    const description = normalizeText(pick(r, ["description", "Description"], ""));
-    const sku = normalizeText(pick(r, ["sku", "SKU"], ""));
+    const description = normalizeText(pick(r, ["description", "Description", "Product name", "product name"], ""));
+    const sku = normalizeText(pick(r, ["sku", "SKU", "Merchant SKU", "Vendor SKU", "External ID"], ""));
     const asin = normalizeText(pick(r, ["asin", "ASIN", "(Child) ASIN", "Child ASIN"], ""));
-    const quantity = normalizeNumber(pick(r, ["quantity", "Quantity"], 0));
-    const productSales = normalizeNumber(pick(r, ["product sales", "Product Sales"], 0));
+    // VC PO exports use "Accepted quantity"; Walmart/etc. may use "units"
+    const quantity = normalizeNumber(pick(r, ["quantity", "Quantity", "Accepted quantity", "Received quantity", "Confirmed Units", "units", "Units"], 0));
+    // VC PO exports use "Total accepted cost" (Cost × Qty) as the revenue line
+    const productSales = normalizeNumber(pick(r, ["product sales", "Product Sales", "Total accepted cost", "Total received cost", "Net Receipts", "Net Shipped GMS"], 0));
+    // Type defaults to "order" when no explicit type column is present AND
+    // there's a positive revenue (handles VC PO sheets which have no type col).
+    const rawType = pick(r, ["type", "Type"], null);
+    const type = rawType
+      ? normalizeText(rawType).toLowerCase()
+      : (productSales > 0 || quantity > 0 ? "order" : "");
     const productSalesTax = normalizeNumber(pick(r, ["product sales tax", "Product Sales Tax"], 0));
     const shippingCredits = normalizeNumber(pick(r, ["shipping credits", "Shipping Credits"], 0));
     const giftWrapCredits = normalizeNumber(pick(r, ["gift wrap credits", "Gift Wrap Credits"], 0));
@@ -607,12 +614,23 @@ function lookupCogs(cogsMap, cogsByAsin, sku, asin) {
   return null;
 }
 
-function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendForPeriod, ym, cogsByAsin) {
+function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendForPeriod, ym, cogsByAsin, agreementsByChannel) {
   const p = emptyPnL();
+  // Track per-channel revenue so agreements (percent deductions) can be applied
+  // to the correct channel's revenue, not lumped Combined revenue.
+  const salesByChannel = {};
+  const addChannelSales = (channel, amt) => {
+    if (!channel) return;
+    salesByChannel[channel] = (salesByChannel[channel] || 0) + amt;
+  };
+  // Per-agreement deduction $ amounts, keyed by agreement name, so the P&L can
+  // render each as a distinct line item in the VC Deductions section.
+  p.agreement_deductions = {};
   for (const r of settlementRows) {
     if (r.ym !== ym) continue;
     if (r.type === "order") {
       p.sales += r.productSales;
+      addChannelSales(r.channel, r.productSales);
       p.shipping_promo += r.shippingCredits + r.promoRebates;
       p.gift_wraps += r.giftWrapCredits;
       p.amazon_commissions += r.sellingFees;
@@ -654,6 +672,29 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
   }
 
   p.advertising += -1 * Math.abs(adSpendForPeriod || 0);
+
+  // Apply per-channel agreement deductions (e.g., amzvc_agreements rows like
+  // ["Freight Allowance", 0.03] become a 3%-of-VC-revenue deduction line).
+  if (agreementsByChannel) {
+    for (const channel of Object.keys(agreementsByChannel)) {
+      const channelSales = salesByChannel[channel] || 0;
+      if (channelSales <= 0) continue;
+      const agreements = agreementsByChannel[channel] || [];
+      for (const ag of agreements) {
+        const amt = -1 * Math.abs(ag.rate * channelSales);
+        // Per-agreement breakdown for the line-item display
+        p.agreement_deductions[ag.name] = (p.agreement_deductions[ag.name] || 0) + amt;
+        // Bucket into the right total via name keyword matching, or
+        // vc_other_deductions as the fallback bucket.
+        const nameLower = ag.name.toLowerCase();
+        if (/\bmdf\b|marketing development/.test(nameLower)) p.vc_mdf += amt;
+        else if (/charge.?back/.test(nameLower)) p.vc_chargebacks += amt;
+        else if (/\bco.?op\b|cooperative/.test(nameLower)) p.vc_coop += amt;
+        else if (/shortage|damage/.test(nameLower)) p.vc_shortages += amt;
+        else p.vc_other_deductions += amt;
+      }
+    }
+  }
 
   p.net_revenue = p.sales + p.shipping_promo + p.gift_wraps + p.refunds + p.reimbursements + p.liquidation;
   p.total_cogs = p.cogs;
@@ -1494,6 +1535,10 @@ export default function App() {
   // amzsc Detail Page Sales and Traffic by Child Item — { yyyy-mm: rows[] }
   const [trafficByMonth, setTrafficByMonth] = useState({});
   const [settlementByMonth, setSettlementByMonth] = useState({});
+  // Per-channel deduction agreements (e.g., amzvc_agreements with rows like
+  // ["Freight Allowance", 0.03], ["Roberts Fees", 0.10]). Applied as % of
+  // that channel's revenue to compute deductions in the P&L.
+  const [agreementsByChannel, setAgreementsByChannel] = useState({});
   // Stub-page data sources
   const [listingQualitySheet, setListingQualitySheet] = useState([]);
   const [pricingSnapshotSheet, setPricingSnapshotSheet] = useState([]);
@@ -1622,6 +1667,54 @@ export default function App() {
           }
         }
         setSettlementByMonth(settlementMap);
+
+        // Per-channel agreements (e.g., amzvc_agreements). Each tab is a
+        // simple 2-column list: deduction name + rate (0.03 = 3% of revenue).
+        // No header required — first row is data. Used to auto-compute
+        // VC deductions like Freight Allowance, Roberts Fees, etc.
+        const agreementResults = await Promise.all(
+          targetChannels.map(async (channel) => ({
+            channel,
+            rows: await safe(`${channel}_agreements`),
+          }))
+        );
+        const agreementsMap = {};
+        for (const { channel, rows } of agreementResults) {
+          if (!rows || rows.length === 0) continue;
+          const list = [];
+          for (const r of rows) {
+            // Rows from fetchSheet are keyed by column LABEL. Without a real
+            // header row, gviz uses the first row's values as labels — so the
+            // first agreement becomes the label and we lose it. To handle
+            // both cases (header present vs not), iterate all keys and look
+            // for a numeric value.
+            const keys = Object.keys(r);
+            let name = null;
+            let rate = null;
+            for (const k of keys) {
+              const v = r[k];
+              if (v === null || v === undefined || v === "") continue;
+              const asNum = Number(v);
+              if (!isNaN(asNum) && Math.abs(asNum) > 0 && Math.abs(asNum) < 1.5) {
+                rate = asNum;
+              } else if (typeof v === "string" || (typeof v === "number" && !isFinite(asNum))) {
+                if (!name) name = String(v).trim();
+              }
+            }
+            // Also include the gviz column label as a candidate name (handles
+            // the no-header case where first row got promoted to column label)
+            if (!name && keys.length >= 1) name = keys[0];
+            if (!rate && keys.length >= 2) {
+              const v2 = Number(keys[1]);
+              if (!isNaN(v2)) rate = v2;
+            }
+            if (name && typeof rate === "number" && rate !== 0) {
+              list.push({ name, rate });
+            }
+          }
+          if (list.length > 0) agreementsMap[channel] = list;
+        }
+        setAgreementsByChannel(agreementsMap);
 
         // Traffic exports — same monthly cadence, header-row auto-detect.
         const trafficResults = await Promise.all(
@@ -1773,8 +1866,8 @@ export default function App() {
 
   const pnl = useMemo(() => {
     if (!pnlPeriod) return emptyPnL();
-    return computePnLForPeriod(settlementRows, cogsMap, fixedCosts, adSpendCurrentMonth, pnlPeriod, cogsByAsin);
-  }, [settlementRows, cogsMap, cogsByAsin, fixedCosts, adSpendCurrentMonth, pnlPeriod]);
+    return computePnLForPeriod(settlementRows, cogsMap, fixedCosts, adSpendCurrentMonth, pnlPeriod, cogsByAsin, agreementsByChannel);
+  }, [settlementRows, cogsMap, cogsByAsin, fixedCosts, adSpendCurrentMonth, pnlPeriod, agreementsByChannel]);
 
   const pnlByAsin = useMemo(
     () => (pnlPeriod ? computePnLByAsin(settlementRows, cogsMap, pnlPeriod, cogsByAsin) : []),
@@ -5202,56 +5295,6 @@ function PromotionsFeesPage({ promotions = [], settlementRows = [] }) {
       <SectionCard title="Active Deals" subtitle={`${active.length} live as of today`}>
         {active.length === 0 ? (
           <p className="text-sm text-slate-400">No active promotions in the sheet.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wider text-slate-400">
-                  <th className="px-3 py-2">Deal Type</th>
-                  <th className="px-3 py-2">SKU / ASIN</th>
-                  <th className="px-3 py-2">Window</th>
-                  <th className="px-3 py-2 text-right">Discount</th>
-                  <th className="px-3 py-2">Notes</th>
-                </tr>
-              </thead>
-              <tbody>
-                {active.map((d, i) => (
-                  <tr key={i} className="border-b border-slate-900 hover:bg-slate-900/30">
-                    <td className="px-3 py-2 text-cyan-300">{d.dealType}</td>
-                    <td className="px-3 py-2 font-mono text-xs text-slate-300">{d.sku} {d.asin}</td>
-                    <td className="px-3 py-2 text-xs text-slate-400">{d.startDate} → {d.endDate}</td>
-                    <td className="px-3 py-2 text-right font-mono text-white">{d.discountPct ? `${d.discountPct}%` : "—"}</td>
-                    <td className="px-3 py-2 text-xs text-slate-400">{d.notes}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </SectionCard>
-
-      <SectionCard
-        title="Fee Creep Audit"
-        subtitle="Month-over-month fee dollars and as % of revenue, derived from settlement"
-        right={
-          <ExportButton
-            filename="fee-creep.csv"
-            rows={feeByMonth}
-            columns={[
-              { key: "ym", label: "Month" },
-              { key: "revenue", label: "Revenue" },
-              { key: "fba_storage_fees", label: "Storage", accessor: (r) => r.fees.fba_storage_fees || 0 },
-              { key: "fba_inventory_fees", label: "Inventory", accessor: (r) => r.fees.fba_inventory_fees || 0 },
-              { key: "fba_removal_fees", label: "Removal", accessor: (r) => r.fees.fba_removal_fees || 0 },
-              { key: "fba_customer_return_fees", label: "Customer Return", accessor: (r) => r.fees.fba_customer_return_fees || 0 },
-              { key: "other_fba_fees", label: "Other FBA", accessor: (r) => r.fees.other_fba_fees || 0 },
-              { key: "amazon_commissions", label: "Selling Fees", accessor: (r) => r.fees.amazon_commissions || 0 },
-            ]}
-          />
-        }
-      >
-        {feeByMonth.length === 0 ? (
-          <p className="text-sm text-slate-400">Need at least one settlement month to compute fee trend.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
