@@ -451,15 +451,16 @@ const FEE_RULES = [
   [/customer return/, "fba_customer_return_fees"],
   [/inventory placement/, "fba_inventory_fees"],
   [/liquidation/, "liquidation"],
-  // Vendor Central deductions — entered manually as Adjustment rows in
-  // amzvc_settlement_<YYYY>_<MM>. Match common naming variants:
-  [/\bmdf\b|marketing development/, "vc_mdf"],
-  [/charge.?back/, "vc_chargebacks"],
-  [/\bco.?op\b|cooperative/, "vc_coop"],
-  [/shortage|short ship|damage claim|po damages/, "vc_shortages"],
-  [/\bdamages?\b/, "vc_shortages"],
-  [/price protection|price claim|toc\b|terms of co-?op/, "vc_other_deductions"],
-  [/vendor deduction|vc deduction|vendor adjustment/, "vc_other_deductions"],
+  // Vendor Central deductions — these only apply when the row's channel is
+  // amzvc (gated downstream in computePnLForPeriod). Patterns kept tight to
+  // avoid accidental matches on Seller Central adjustment descriptions like
+  // "FBA Inventory Reimbursement - Damaged:Warehouse".
+  [/\bmdf\b|marketing development fund/, "vc_mdf"],
+  [/\bcharge.?back/, "vc_chargebacks"],
+  [/\bco.?op contribution|\bcooperative contribution/, "vc_coop"],
+  [/\bpo damages?\b|\bvendor damages?\b|\bshort ship|\bshortage claim/, "vc_shortages"],
+  [/\bprice protection|\bprice claim|\bterms of co-?op|\btoc deduction/, "vc_other_deductions"],
+  [/\bvendor deduction|\bvc deduction|\bvendor adjustment/, "vc_other_deductions"],
 ];
 
 function categorizeAdjustment(description) {
@@ -651,15 +652,27 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
       p.cogs += Math.abs(unitCost) * Math.abs(r.quantity);
     } else if (r.type === "adjustment") {
       const cat = r.adjustmentCategory;
-      if (cat && p[cat] !== undefined) {
+      // Channel-gate VC line items: a row tagged amzsc can never route to a
+      // vc_* bucket (was causing cross-channel pollution). Non-VC rows that
+      // happen to match a VC regex spill into other_fba_fees instead.
+      const isVcCat = cat && cat.startsWith("vc_");
+      if (isVcCat && r.channel !== "amzvc") {
+        p.other_fba_fees += r.total;
+      } else if (cat && p[cat] !== undefined) {
         p[cat] += r.total;
       } else if (cat) {
         p.other_fba_fees += r.total;
       }
     } else if (r.type === "service fee" || r.type === "service_fee") {
       const cat = categorizeAdjustment(r.description);
-      if (p[cat] !== undefined) p[cat] += r.total;
-      else p.other_fba_fees += r.total;
+      const isVcCat = cat && cat.startsWith("vc_");
+      if (isVcCat && r.channel !== "amzvc") {
+        p.other_fba_fees += r.total;
+      } else if (p[cat] !== undefined) {
+        p[cat] += r.total;
+      } else {
+        p.other_fba_fees += r.total;
+      }
     } else if (r.type === "order_retrocharge") {
       p.amazon_commissions += r.sellingFees;
       p.sales_tax_collected += r.productSalesTax;
