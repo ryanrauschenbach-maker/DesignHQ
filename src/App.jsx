@@ -456,6 +456,7 @@ function parseSettlementSheet(rows, ym) {
     const type = normalizeText(pick(r, ["type", "Type"], "")).toLowerCase();
     const description = normalizeText(pick(r, ["description", "Description"], ""));
     const sku = normalizeText(pick(r, ["sku", "SKU"], ""));
+    const asin = normalizeText(pick(r, ["asin", "ASIN", "(Child) ASIN", "Child ASIN"], ""));
     const quantity = normalizeNumber(pick(r, ["quantity", "Quantity"], 0));
     const productSales = normalizeNumber(pick(r, ["product sales", "Product Sales"], 0));
     const productSalesTax = normalizeNumber(pick(r, ["product sales tax", "Product Sales Tax"], 0));
@@ -474,6 +475,7 @@ function parseSettlementSheet(rows, ym) {
       type,
       description,
       sku,
+      asin,
       quantity,
       productSales,
       productSalesTax,
@@ -572,7 +574,20 @@ function emptyPnL() {
   return o;
 }
 
-function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendForPeriod, ym) {
+// Resolve a cogs entry by SKU first, then by ASIN as a fallback. Lets us
+// match Vendor Central / Walmart rows that only have ASIN, not internal SKU.
+function lookupCogs(cogsMap, cogsByAsin, sku, asin) {
+  if (sku && cogsMap && cogsMap.get) {
+    const bySku = cogsMap.get(sku);
+    if (bySku) return bySku;
+  }
+  if (asin && cogsByAsin && cogsByAsin.get) {
+    return cogsByAsin.get(String(asin).trim().toUpperCase()) || null;
+  }
+  return null;
+}
+
+function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendForPeriod, ym, cogsByAsin) {
   const p = emptyPnL();
   for (const r of settlementRows) {
     if (r.ym !== ym) continue;
@@ -584,7 +599,7 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
       p.outbound_fba += r.fbaFees;
       p.sales_tax_collected += r.productSalesTax;
       p.marketplace_withheld_tax += r.marketplaceWithheld;
-      const cogsEntry = cogsMap.get(r.sku);
+      const cogsEntry = lookupCogs(cogsMap, cogsByAsin, r.sku, r.asin);
       const unitCost = cogsEntry ? cogsEntry.cost : r.reportedUnitCost;
       p.cogs += -1 * Math.abs(unitCost) * Math.abs(r.quantity);
     } else if (r.type === "refund") {
@@ -593,7 +608,7 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
       p.outbound_fba += r.fbaFees;
       p.sales_tax_collected += r.productSalesTax;
       p.marketplace_withheld_tax += r.marketplaceWithheld;
-      const cogsEntry = cogsMap.get(r.sku);
+      const cogsEntry = lookupCogs(cogsMap, cogsByAsin, r.sku, r.asin);
       const unitCost = cogsEntry ? cogsEntry.cost : r.reportedUnitCost;
       p.cogs += Math.abs(unitCost) * Math.abs(r.quantity);
     } else if (r.type === "adjustment") {
@@ -645,15 +660,15 @@ function computePnLForPeriod(settlementRows, cogsMap, fixedCostsRows, adSpendFor
   return p;
 }
 
-function computePnLByAsin(settlementRows, cogsMap, ym) {
+function computePnLByAsin(settlementRows, cogsMap, ym, cogsByAsin) {
   const map = new Map();
   for (const r of settlementRows) {
     if (r.ym !== ym) continue;
     if (r.type !== "order" && r.type !== "refund") continue;
     const sku = r.sku || "(no sku)";
-    const cogsEntry = cogsMap.get(sku);
-    const asin = cogsEntry?.asin || "";
-    const title = cogsEntry?.title || r.description || "";
+    const cogsEntry = lookupCogs(cogsMap, cogsByAsin, r.sku, r.asin);
+    const asin = (cogsEntry && cogsEntry.asin) || r.asin || "";
+    const title = (cogsEntry && cogsEntry.title) || r.description || "";
     const unitCost = cogsEntry ? cogsEntry.cost : r.reportedUnitCost;
     const cur = map.get(sku) || {
       sku,
@@ -1534,15 +1549,27 @@ export default function App() {
         setWmt1pSearchTermsRaw(w1pSt); setWmt3pSearchTermsRaw(w3pSt); setWmtotherSearchTermsRaw(wothSt);
 
         const months = generateTrailingMonthCodes();
+        // Multi-channel: fetch settlement tabs for every enabled channel.
+        // Tab naming convention: `<channelCode>_settlement_<YYYY>_<MM>`.
+        // Missing tabs return [] (safe), so unused channels just stay empty.
+        const channelList = parseChannelConfig(chCfg).filter((c) => c.enabled).map((c) => c.code);
+        const targetChannels = channelList.length > 0 ? channelList : ["amzsc"];
+        const settlementPairs = [];
+        for (const channel of targetChannels) {
+          for (const ym of months) {
+            settlementPairs.push({ channel, ym });
+          }
+        }
         const settlementResults = await Promise.all(
-          months.map(async (ym) => ({
+          settlementPairs.map(async ({ channel, ym }) => ({
+            channel,
             ym,
-            rows: await fetchSettlementSheet(`amzsc_settlement_${ym}`),
+            rows: await fetchSettlementSheet(`${channel}_settlement_${ym}`),
           }))
         );
         const settlementMap = {};
-        for (const { ym, rows } of settlementResults) {
-          if (rows && rows.length) settlementMap[`amzsc|${ym}`] = rows;
+        for (const { channel, ym, rows } of settlementResults) {
+          if (rows && rows.length) settlementMap[`${channel}|${ym}`] = rows;
         }
         setSettlementByMonth(settlementMap);
 
@@ -1559,11 +1586,12 @@ export default function App() {
         }
         setTrafficByMonth(trafficMap);
 
-        // Buy box exports — monthly, same parser path.
+        // Buy box exports — monthly. Use fetchSheet directly (these tabs are
+        // user-maintained with headers in row 1, no Amazon preamble to skip).
         const buyBoxResults = await Promise.all(
           months.map(async (ym) => ({
             ym,
-            rows: await fetchSettlementSheet(`amzsc_buybox_${ym}`),
+            rows: await safe(`amzsc_buybox_${ym}`),
           }))
         );
         const buyBoxMap = {};
@@ -1628,21 +1656,64 @@ export default function App() {
   }, [settlementByMonth]);
 
   useEffect(() => {
-    const months = loadedMonthsByChannel[activeScope[0]] || [];
+    // Union of months across every channel in active scope, latest first.
+    const set = new Set();
+    for (const c of activeScope) {
+      for (const ym of loadedMonthsByChannel[c] || []) set.add(ym);
+    }
+    const months = Array.from(set).sort().reverse();
     if (!pnlPeriod && months.length) setPnlPeriod(months[0]);
   }, [loadedMonthsByChannel, activeScope, pnlPeriod]);
+
+  // Channels that share an account with another seller — settlement rows are
+  // filtered to only SKUs/ASINs present in the user's cogs sheet (their
+  // catalog). Add a channel code here to apply the same filter elsewhere.
+  const SHARED_ACCOUNT_CHANNELS = useMemo(() => new Set(["amzvc"]), []);
+
+  // Build an ASIN allowlist from cogs (covers cases where settlement rows have
+  // ASIN but no Vendor SKU, e.g. Vendor Central Sales Diagnostic exports).
+  const cogsAsinSet = useMemo(() => {
+    const set = new Set();
+    for (const entry of cogsMap.values()) {
+      if (entry && entry.asin) set.add(String(entry.asin).trim().toUpperCase());
+    }
+    return set;
+  }, [cogsMap]);
 
   const settlementRows = useMemo(() => {
     const out = [];
     for (const [key, rows] of Object.entries(settlementByMonth)) {
       const [channel, ym] = key.split("|");
-      if (channel !== activeScope[0]) continue;
-      out.push(...parseSettlementSheet(rows, ym));
+      // Include every channel in active scope — drives Combined P&L
+      if (!activeScope.includes(channel)) continue;
+      const parsed = parseSettlementSheet(rows, ym).map((r) => ({ ...r, channel }));
+      // For shared accounts, filter to only rows whose SKU or ASIN appears in
+      // cogs. This is how Vendor Central / shared marketplace data gets cleaned
+      // without manual pre-filtering.
+      const filtered = SHARED_ACCOUNT_CHANNELS.has(channel)
+        ? parsed.filter((r) => {
+            const hasSku = r.sku && cogsMap.has(r.sku);
+            const hasAsin = r.asin && cogsAsinSet.has(String(r.asin).trim().toUpperCase());
+            // Fee/adjustment rows have no sku — keep them so totals stay sane
+            const isFeeOrAdjustment = !r.sku && !r.asin && (r.type === "adjustment" || r.type.includes("fee") || r.type.includes("service"));
+            return hasSku || hasAsin || isFeeOrAdjustment;
+          })
+        : parsed;
+      out.push(...filtered);
     }
     return out;
-  }, [settlementByMonth, activeScope]);
+  }, [settlementByMonth, activeScope, SHARED_ACCOUNT_CHANNELS, cogsMap, cogsAsinSet]);
 
   const cogsMap = useMemo(() => parseCogs(cogsSheet), [cogsSheet]);
+  // Secondary lookup by ASIN — used when settlement rows have ASIN but no
+  // internal SKU (Vendor Central Net PPM exports, Walmart, etc.).
+  const cogsByAsin = useMemo(() => {
+    const map = new Map();
+    for (const entry of cogsMap.values()) {
+      if (entry && entry.asin) map.set(String(entry.asin).trim().toUpperCase(), entry);
+    }
+    return map;
+  }, [cogsMap]);
   const fixedCosts = useMemo(() => parseFixedCostsMonthly(fixedCostsSheet), [fixedCostsSheet]);
 
   const adSpendCurrentMonth = useMemo(
@@ -1652,12 +1723,12 @@ export default function App() {
 
   const pnl = useMemo(() => {
     if (!pnlPeriod) return emptyPnL();
-    return computePnLForPeriod(settlementRows, cogsMap, fixedCosts, adSpendCurrentMonth, pnlPeriod);
-  }, [settlementRows, cogsMap, fixedCosts, adSpendCurrentMonth, pnlPeriod]);
+    return computePnLForPeriod(settlementRows, cogsMap, fixedCosts, adSpendCurrentMonth, pnlPeriod, cogsByAsin);
+  }, [settlementRows, cogsMap, cogsByAsin, fixedCosts, adSpendCurrentMonth, pnlPeriod]);
 
   const pnlByAsin = useMemo(
-    () => (pnlPeriod ? computePnLByAsin(settlementRows, cogsMap, pnlPeriod) : []),
-    [settlementRows, cogsMap, pnlPeriod]
+    () => (pnlPeriod ? computePnLByAsin(settlementRows, cogsMap, pnlPeriod, cogsByAsin) : []),
+    [settlementRows, cogsMap, cogsByAsin, pnlPeriod]
   );
 
   const filteredAsinRows = useMemo(() => {
@@ -2055,10 +2126,17 @@ export default function App() {
     );
   }
 
-  const periodOptions = (loadedMonthsByChannel[activeScope[0]] || []).map((ym) => ({
-    value: ym,
-    label: ymToLabel(ym),
-  }));
+  // Period options = union of months across every channel currently in scope.
+  const periodOptions = useMemo(() => {
+    const set = new Set();
+    for (const c of activeScope) {
+      for (const ym of loadedMonthsByChannel[c] || []) set.add(ym);
+    }
+    return Array.from(set).sort().reverse().map((ym) => ({
+      value: ym,
+      label: ymToLabel(ym),
+    }));
+  }, [activeScope, loadedMonthsByChannel]);
 
   const channelOptions = enabledChannels.length
     ? enabledChannels.map((c) => ({ value: c.code, label: c.name }))
@@ -2307,27 +2385,28 @@ export default function App() {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <StatCard
                   label="Net Revenue (selected month)"
-                  value={pnl.net_revenue ? currency(pnl.net_revenue) : "$0"}
+                  value={pnl.net_revenue || 0}
                   icon={DollarSign}
                   tone="cyan"
                 />
                 <StatCard
                   label="Gross Profit"
-                  value={pnl.gross_profit ? currency(pnl.gross_profit) : "$0"}
+                  value={pnl.gross_profit || 0}
                   icon={TrendingUp}
-                  tone={pnl.gross_profit >= 0 ? "emerald" : "rose"}
+                  tone={(pnl.gross_profit || 0) >= 0 ? "emerald" : "rose"}
                 />
                 <StatCard
                   label="Net Profit"
-                  value={pnl.net_profit ? currency(pnl.net_profit) : "$0"}
+                  value={pnl.net_profit || 0}
                   icon={Wallet}
-                  tone={pnl.net_profit >= 0 ? "emerald" : "rose"}
+                  tone={(pnl.net_profit || 0) >= 0 ? "emerald" : "rose"}
                 />
                 <StatCard
                   label="Net Margin"
-                  value={`${(pnl.net_margin || 0).toFixed(1)}%`}
+                  value={pnl.net_margin || 0}
+                  suffix="%"
                   icon={BarChart3}
-                  tone={pnl.net_margin >= 10 ? "emerald" : pnl.net_margin >= 0 ? "amber" : "rose"}
+                  tone={(pnl.net_margin || 0) >= 10 ? "emerald" : (pnl.net_margin || 0) >= 0 ? "amber" : "rose"}
                 />
               </div>
 
@@ -2470,23 +2549,43 @@ export default function App() {
           )}
 
           {/* ===================== P&L ===================== */}
-          {activeTab === "pnl" && (
-            <PnLPage
-              pnl={pnl}
-              pnlPeriod={pnlPeriod}
-              setPnlPeriod={setPnlPeriod}
-              periodOptions={periodOptions}
-              loadedMonths={loadedMonthsByChannel[activeScope[0]] || []}
-              asinRows={asinSort.sortedRows}
-              asinSort={asinSort}
-              channelName={
-                (channels.find((c) => c.code === activeScope[0]) || {}).name || activeScope[0]
+          {activeTab === "pnl" && (() => {
+            // Build loaded-months union across active scope, latest first.
+            const monthSet = new Set();
+            for (const c of activeScope) {
+              for (const ym of loadedMonthsByChannel[c] || []) monthSet.add(ym);
+            }
+            const loadedMonthsUnion = Array.from(monthSet).sort().reverse();
+            // Multi-channel-aware label
+            const channelLabel = (() => {
+              if (activeScope.length === 1) {
+                const ch = channels.find((c) => c.code === activeScope[0]);
+                return ch ? ch.name : activeScope[0];
               }
-              hasCogs={cogsMap.size > 0}
-              hasFixedCosts={fixedCosts.length > 0}
-              hasAdSpend={adSpendCurrentMonth > 0}
-            />
-          )}
+              const amzGroup = ["amzsc", "amzvc"];
+              const wmtGroup = ["wmt1p", "wmt3p", "wmtother"];
+              if (activeScope.every((c) => amzGroup.includes(c)) && activeScope.length === 2) return "Amazon Combined";
+              if (activeScope.every((c) => wmtGroup.includes(c))) return "Walmart Combined";
+              const enabledCodes = channels.filter((c) => c.enabled).map((c) => c.code);
+              if (activeScope.length === enabledCodes.length && enabledCodes.every((c) => activeScope.includes(c))) return "All Channels Combined";
+              return `Combined: ${activeScope.length} channels`;
+            })();
+            return (
+              <PnLPage
+                pnl={pnl}
+                pnlPeriod={pnlPeriod}
+                setPnlPeriod={setPnlPeriod}
+                periodOptions={periodOptions}
+                loadedMonths={loadedMonthsUnion}
+                asinRows={asinSort.sortedRows}
+                asinSort={asinSort}
+                channelName={channelLabel}
+                hasCogs={cogsMap.size > 0}
+                hasFixedCosts={fixedCosts.length > 0}
+                hasAdSpend={adSpendCurrentMonth > 0}
+              />
+            );
+          })()}
 
           {/* ===================== ADVERTISING (FSN) ===================== */}
           {activeTab === "advertising" && (
@@ -3184,30 +3283,42 @@ function InventoryPage({ inventoryByAsin = [] }) {
 function TargetingPage({ spCampaigns = [], referenceByAsin }) {
   const targets = useMemo(() => {
     if (!spCampaigns.length) return [];
+    // SP bulk export rows use Amazon's verbose column labels — pick() with broad
+    // fallbacks across the keyword / target / product-targeting variants.
     return spCampaigns
+      .filter((c) => {
+        const entity = normalizeText(pick(c, ["Entity", "entity"], "")).toLowerCase();
+        // Keep keyword + product targeting rows, drop campaign/ad-group/portfolio shells
+        return entity.includes("keyword") || entity.includes("product targeting") || entity === "target";
+      })
       .map((c) => {
-        const tgt = c.targeting || c.keyword || c.name || "";
+        const tgt = normalizeText(
+          pick(c, ["Keyword Text", "Product Targeting Expression", "Target", "keyword", "targeting"], "")
+        );
         const m = String(tgt).match(/B0[A-Z0-9]{8}/);
         const asin = m ? m[0] : null;
         const ref = asin && referenceByAsin && referenceByAsin.get ? referenceByAsin.get(asin) : null;
-        const spend = num(c.spend);
-        const sales = num(c.sales);
+        const spend = num(pick(c, ["Spend", "Spend(USD)", "Cost"], 0));
+        const sales = num(pick(c, ["Sales", "Sales(USD)", "14 Day Total Sales", "Sales 14 Day Total Sales", "Attributed Sales"], 0));
+        const clicks = num(pick(c, ["Clicks"], 0));
+        const impressions = num(pick(c, ["Impressions"], 0));
+        const orders = num(pick(c, ["Orders", "Orders (#)"], 0));
         return {
           targeting: tgt || "—",
           asin,
-          campaign: c.campaignName || c.name || "—",
-          impressions: num(c.impressions),
-          clicks: num(c.clicks),
+          campaign: normalizeText(pick(c, ["Campaign Name (Informational only)", "Campaign Name", "Campaign"], "—")),
+          impressions,
+          clicks,
           spend,
           sales,
-          orders: num(c.orders),
+          orders,
           acos: spend > 0 && sales > 0 ? (spend / sales) * 100 : 0,
           roas: spend > 0 ? sales / spend : 0,
           imageUrl: ref ? ref.imageUrl : undefined,
           title: ref ? ref.title : undefined,
         };
       })
-      .filter((t) => t.spend > 0 || t.clicks > 0)
+      .filter((t) => t.targeting !== "—" && (t.spend > 0 || t.clicks > 0))
       .sort((a, b) => b.spend - a.spend);
   }, [spCampaigns, referenceByAsin]);
 
@@ -3449,31 +3560,37 @@ function WhatChangedPage({ settlementRows = [], cogsMap, referenceByAsin, traffi
   const monthlyByAsin = useMemo(() => {
     const map = new Map();
     for (const r of settlementRows) {
-      const asin = r.asin || r.ASIN;
+      // settlement rows use SKU, not ASIN — translate via cogsMap
+      const sku = r.sku;
+      if (!sku) continue;
+      const cogsEntry = cogsMap && cogsMap.get ? cogsMap.get(sku) : null;
+      const asin = (cogsEntry && cogsEntry.asin) || sku;
       if (!asin) continue;
-      const dateStr = r.postedDate || r.posted_date || r.date;
-      const d = dateStr ? new Date(dateStr) : null;
-      if (!d || isNaN(d)) continue;
-      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      // r.ym is YYYY_MM from parseSettlementSheet — keep underscored to match
+      // trafficByAsinByMonth keys (also YYYY_MM)
+      const ym = String(r.ym || "");
+      if (!ym || ym.length !== 7) continue;
       const inner = map.get(asin) || new Map();
       const cur = inner.get(ym) || { units: 0, sales: 0, refunds: 0, refundUnits: 0, fees: 0 };
-      const units = num(r.quantity || r.qty || r.units);
-      const amt = num(r.amount || r.total);
-      const type = String(r.transactionType || r.type || "").toLowerCase();
-      if (type.includes("refund")) {
-        cur.refunds += Math.abs(amt);
-        cur.refundUnits += Math.abs(units);
-      } else if (type.includes("order")) {
+      const units = Math.abs(r.quantity || 0);
+      const productSales = r.productSales || 0;
+      const sellingFees = r.sellingFees || 0;
+      const fbaFees = r.fbaFees || 0;
+      const type = String(r.type || "").toLowerCase();
+      if (type === "refund") {
+        cur.refunds += Math.abs(productSales);
+        cur.refundUnits += units;
+        cur.fees += Math.abs(sellingFees) + Math.abs(fbaFees);
+      } else if (type === "order") {
         cur.units += units;
-        cur.sales += amt;
-      } else if (type.includes("fee")) {
-        cur.fees += Math.abs(amt);
+        cur.sales += productSales;
+        cur.fees += Math.abs(sellingFees) + Math.abs(fbaFees);
       }
       inner.set(ym, cur);
       map.set(asin, inner);
     }
     return map;
-  }, [settlementRows]);
+  }, [settlementRows, cogsMap]);
 
   const movers = useMemo(() => {
     const out = [];
