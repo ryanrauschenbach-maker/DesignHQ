@@ -47,6 +47,7 @@ const TAB_NAMES = {
   channelConfig: "channel_config",
   cogs: "cogs",
   fixedCostsMonthly: "fixed_costs_monthly",
+  adsMonthly: "ads_monthly",
   itemRef: "item_data_reference",
   spCampaigns: "Sponsored Products Campaigns",
   sbCampaigns: "Sponsored Brands Campaigns",
@@ -1535,6 +1536,7 @@ export default function App() {
   const [channelConfigSheet, setChannelConfigSheet] = useState([]);
   const [cogsSheet, setCogsSheet] = useState([]);
   const [fixedCostsSheet, setFixedCostsSheet] = useState([]);
+  const [adsMonthlySheet, setAdsMonthlySheet] = useState([]);
   const [itemRefSheet, setItemRefSheet] = useState([]);
   const [spCampaigns, setSpCampaigns] = useState([]);
   const [sbCampaigns, setSbCampaigns] = useState([]);
@@ -1593,6 +1595,7 @@ export default function App() {
           spCamp7, sbCamp7, sdCamp7, spCamp60, sbCamp60, sdCamp60,
           w1p7, w1p30, w1p60, w3p7, w3p30, w3p60, woth7, woth30, woth60,
           w1pSt, w3pSt, wothSt,
+          adsMon,
         ] = await Promise.all([
           fetchSheet(TAB_NAMES.channelConfig),
           fetchSheet(TAB_NAMES.cogs),
@@ -1626,6 +1629,7 @@ export default function App() {
           safe(TAB_NAMES.wmt1pSearchTerms),
           safe(TAB_NAMES.wmt3pSearchTerms),
           safe(TAB_NAMES.wmtotherSearchTerms),
+          safe(TAB_NAMES.adsMonthly),
         ]);
 
         setChannelConfigSheet(chCfg);
@@ -1652,6 +1656,7 @@ export default function App() {
         setWmt3pCampaigns7(w3p7); setWmt3pCampaigns30(w3p30); setWmt3pCampaigns60(w3p60);
         setWmtotherCampaigns7(woth7); setWmtotherCampaigns30(woth30); setWmtotherCampaigns60(woth60);
         setWmt1pSearchTermsRaw(w1pSt); setWmt3pSearchTermsRaw(w3pSt); setWmtotherSearchTermsRaw(wothSt);
+        setAdsMonthlySheet(adsMon);
 
         const months = generateTrailingMonthCodes();
         // Multi-channel: fetch settlement tabs for every enabled channel.
@@ -1921,10 +1926,23 @@ export default function App() {
     [activeScope, spCampaigns, sbCampaigns, sdCampaigns]
   );
 
+  // Month-bucketed Amazon ad spend for the selected P&L period, from the
+  // ads_monthly tab (BigQuery vw_dhq_ads_monthly: client-P&L actuals through
+  // 2026_06, daily ad reports thereafter). Falls back to the 30d campaign
+  // rollup only when the tab is missing entirely, so older sheets still work.
+  const adSpendForPeriod = useMemo(() => {
+    if (!activeScope.includes("amzsc")) return 0;
+    if (!Array.isArray(adsMonthlySheet) || adsMonthlySheet.length === 0) return adSpendCurrentMonth;
+    const row = adsMonthlySheet.find(
+      (r) => normalizeText(pick(r, ["month", "Month"], "")) === pnlPeriod
+    );
+    return row ? Math.abs(normalizeNumber(pick(row, ["spend", "Spend"], 0))) : 0;
+  }, [activeScope, adsMonthlySheet, adSpendCurrentMonth, pnlPeriod]);
+
   const pnl = useMemo(() => {
     if (!pnlPeriod) return emptyPnL();
-    return computePnLForPeriod(settlementRows, cogsMap, fixedCosts, adSpendCurrentMonth, pnlPeriod, cogsByAsin, agreementsByChannel);
-  }, [settlementRows, cogsMap, cogsByAsin, fixedCosts, adSpendCurrentMonth, pnlPeriod, agreementsByChannel]);
+    return computePnLForPeriod(settlementRows, cogsMap, fixedCosts, adSpendForPeriod, pnlPeriod, cogsByAsin, agreementsByChannel);
+  }, [settlementRows, cogsMap, cogsByAsin, fixedCosts, adSpendForPeriod, pnlPeriod, agreementsByChannel]);
 
   const pnlByAsin = useMemo(
     () => (pnlPeriod ? computePnLByAsin(settlementRows, cogsMap, pnlPeriod, cogsByAsin) : []),
@@ -2784,7 +2802,7 @@ export default function App() {
                 channelName={channelLabel}
                 hasCogs={cogsMap.size > 0}
                 hasFixedCosts={fixedCosts.length > 0}
-                hasAdSpend={adSpendCurrentMonth > 0}
+                hasAdSpend={adSpendForPeriod > 0}
               />
             );
           })()}
