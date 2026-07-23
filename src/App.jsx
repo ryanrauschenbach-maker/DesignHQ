@@ -76,6 +76,7 @@ const TAB_NAMES = {
   wmtotherCampaigns30: "wmtother_campaigns_30",
   wmtotherCampaigns60: "wmtother_campaigns_60",
   wmt1pSearchTerms: "wmt1p_search_terms",
+  wmt1pSellthrough: "wmt1p_sellthrough",
   wmt3pSearchTerms: "wmt3p_search_terms",
   wmtotherSearchTerms: "wmtother_search_terms",
   // amzsc traffic exports — Detail Page Sales and Traffic by Child Item
@@ -1537,6 +1538,7 @@ export default function App() {
   const [cogsSheet, setCogsSheet] = useState([]);
   const [fixedCostsSheet, setFixedCostsSheet] = useState([]);
   const [adsMonthlySheet, setAdsMonthlySheet] = useState([]);
+  const [wmt1pSellthroughSheet, setWmt1pSellthroughSheet] = useState([]);
   const [itemRefSheet, setItemRefSheet] = useState([]);
   const [spCampaigns, setSpCampaigns] = useState([]);
   const [sbCampaigns, setSbCampaigns] = useState([]);
@@ -1596,6 +1598,7 @@ export default function App() {
           w1p7, w1p30, w1p60, w3p7, w3p30, w3p60, woth7, woth30, woth60,
           w1pSt, w3pSt, wothSt,
           adsMon,
+          w1pSell,
         ] = await Promise.all([
           fetchSheet(TAB_NAMES.channelConfig),
           fetchSheet(TAB_NAMES.cogs),
@@ -1630,6 +1633,7 @@ export default function App() {
           safe(TAB_NAMES.wmt3pSearchTerms),
           safe(TAB_NAMES.wmtotherSearchTerms),
           safe(TAB_NAMES.adsMonthly),
+          safe(TAB_NAMES.wmt1pSellthrough),
         ]);
 
         setChannelConfigSheet(chCfg);
@@ -1657,6 +1661,7 @@ export default function App() {
         setWmtotherCampaigns7(woth7); setWmtotherCampaigns30(woth30); setWmtotherCampaigns60(woth60);
         setWmt1pSearchTermsRaw(w1pSt); setWmt3pSearchTermsRaw(w3pSt); setWmtotherSearchTermsRaw(wothSt);
         setAdsMonthlySheet(adsMon);
+        setWmt1pSellthroughSheet(w1pSell);
 
         const months = generateTrailingMonthCodes();
         // Multi-channel: fetch settlement tabs for every enabled channel.
@@ -2329,12 +2334,13 @@ export default function App() {
     { id: "buyBox", label: "Buy Box", icon: ShoppingBag },
     { id: "listingQuality", label: "Listing Quality", icon: FileText },
     { id: "returns", label: "Returns", icon: RefreshCw },
+    { id: "sellThrough", label: "1P Sell-Through", icon: Boxes },
     { id: "launchTracker", label: "Launch Tracker", icon: Rocket },
     { id: "pricingParity", label: "Pricing Parity", icon: Tags },
     { id: "channelComparison", label: "Channel Comparison", icon: Globe },
     { id: "promotionsFees", label: "Promotions & Fees", icon: Receipt },
     { id: "settings", label: "Settings", icon: SettingsIcon },
-  ];
+  ].filter((t) => t.id !== "sellThrough" || activeScope.includes("wmt1p"));
 
   // Period options = union of months across every channel currently in scope.
   // Must come BEFORE any early-return so React's hook ordering stays stable
@@ -2877,6 +2883,11 @@ export default function App() {
           {/* ===================== RETURNS ===================== */}
           {activeTab === "returns" && (
             <ReturnsPage settlementRows={settlementRows} cogsMap={cogsMap} referenceByAsin={referenceByAsin} />
+          )}
+
+          {/* ===================== 1P SELL-THROUGH ===================== */}
+          {activeTab === "sellThrough" && (
+            <SellThroughPage rows={wmt1pSellthroughSheet} />
           )}
 
           {/* ===================== LAUNCH TRACKER ===================== */}
@@ -4672,6 +4683,244 @@ function ListingQualityPage({ rows = [], activeScope = [] }) {
 // =============================================================================
 // PRICING PARITY MONITOR
 // =============================================================================
+
+// =============================================================================
+// 1P SELL-THROUGH (Scintilla store POS + eComm, weekly by item)
+// =============================================================================
+
+function parseSellthroughWeek(v) {
+  if (v == null) return "";
+  const s = String(v).trim();
+  const m = s.match(/^Date\((\d+),(\d+),(\d+)/);
+  if (m) {
+    const d = new Date(Number(m[1]), Number(m[2]), Number(m[3]));
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${d.getFullYear()}-${mm}-${dd}`;
+  }
+  return s.slice(0, 10);
+}
+
+function SellThroughPage({ rows = [] }) {
+  const parsed = useMemo(
+    () =>
+      rows
+        .map((r) => ({
+          week: parseSellthroughWeek(pick(r, ["week_ending", "Week Ending"], "")),
+          month: normalizeText(pick(r, ["month", "Month"], "")),
+          item: normalizeText(pick(r, ["walmart_item_number", "Item #", "item"], "")),
+          name: normalizeText(pick(r, ["item_name", "Item Name"], "")),
+          storeUnits: normalizeNumber(pick(r, ["store_units"], 0)),
+          storeSales: normalizeNumber(pick(r, ["store_sales"], 0)),
+          ecommUnits: normalizeNumber(pick(r, ["ecomm_units"], 0)),
+          ecommSales: normalizeNumber(pick(r, ["ecomm_sales"], 0)),
+        }))
+        .filter((r) => r.week && r.month),
+    [rows]
+  );
+
+  const months = useMemo(
+    () => Array.from(new Set(parsed.map((r) => r.month))).sort().reverse(),
+    [parsed]
+  );
+  const [selMonth, setSelMonth] = useState("");
+  const activeMonth = selMonth || months[0] || "";
+
+  const totals = useMemo(() => {
+    const t = { storeUnits: 0, storeSales: 0, ecommUnits: 0, ecommSales: 0 };
+    for (const r of parsed) {
+      t.storeUnits += r.storeUnits;
+      t.storeSales += r.storeSales;
+      t.ecommUnits += r.ecommUnits;
+      t.ecommSales += r.ecommSales;
+    }
+    return t;
+  }, [parsed]);
+
+  const byMonth = useMemo(() => {
+    const map = new Map();
+    for (const r of parsed) {
+      const m = map.get(r.month) || { month: r.month, storeUnits: 0, storeSales: 0, ecommUnits: 0, ecommSales: 0 };
+      m.storeUnits += r.storeUnits;
+      m.storeSales += r.storeSales;
+      m.ecommUnits += r.ecommUnits;
+      m.ecommSales += r.ecommSales;
+      map.set(r.month, m);
+    }
+    return Array.from(map.values()).sort((a, b) => (a.month < b.month ? 1 : -1));
+  }, [parsed]);
+
+  const itemsForMonth = useMemo(() => {
+    const map = new Map();
+    for (const r of parsed) {
+      if (r.month !== activeMonth) continue;
+      const m = map.get(r.item) || { item: r.item, name: r.name, storeUnits: 0, storeSales: 0, ecommUnits: 0, ecommSales: 0 };
+      m.storeUnits += r.storeUnits;
+      m.storeSales += r.storeSales;
+      m.ecommUnits += r.ecommUnits;
+      m.ecommSales += r.ecommSales;
+      if (!m.name && r.name) m.name = r.name;
+      map.set(r.item, m);
+    }
+    return Array.from(map.values())
+      .filter((m) => m.storeUnits || m.storeSales || m.ecommUnits || m.ecommSales)
+      .sort((a, b) => b.storeSales + b.ecommSales - (a.storeSales + a.ecommSales));
+  }, [parsed, activeMonth]);
+
+  const recentWeeks = useMemo(() => {
+    const map = new Map();
+    for (const r of parsed) {
+      const m = map.get(r.week) || { week: r.week, storeUnits: 0, storeSales: 0, ecommUnits: 0, ecommSales: 0 };
+      m.storeUnits += r.storeUnits;
+      m.storeSales += r.storeSales;
+      m.ecommUnits += r.ecommUnits;
+      m.ecommSales += r.ecommSales;
+      map.set(r.week, m);
+    }
+    return Array.from(map.values()).sort((a, b) => (a.week < b.week ? 1 : -1)).slice(0, 13);
+  }, [parsed]);
+
+  if (!parsed.length) {
+    return (
+      <EmptyStateCard
+        title="1P Sell-Through"
+        body="No Walmart 1P sell-through rows loaded yet. This module reads Scintilla store POS + eComm data synced hourly from BigQuery."
+        requiredSheets={["wmt1p_sellthrough"]}
+        icon={Boxes}
+      />
+    );
+  }
+
+  const monthLabel = (m) => {
+    const [y, mo] = m.split("_");
+    const names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    return `${names[Number(mo) - 1] || mo} ${y}`;
+  };
+
+  const thCls = "px-3 py-2 text-right text-[11px] uppercase tracking-wider text-slate-500";
+  const tdCls = "px-3 py-2 text-right text-sm text-slate-200";
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-xl font-semibold text-white">Walmart 1P Sell-Through</h2>
+        <p className="mt-1 text-sm text-slate-400">
+          Store POS (in-store, pickup, delivery, ship-from-store) + eComm shipped sales, by Walmart week.
+          Source: Scintilla · trailing 52 weeks · latest week ending {recentWeeks[0]?.week || "—"}.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+        <StatCard label="Store POS $ (52wk)" value={totals.storeSales} icon={DollarSign} tone="cyan" />
+        <StatCard label="Store Units (52wk)" value={totals.storeUnits} icon={Boxes} tone="emerald" suffix="count" />
+        <StatCard label="eComm Net $ (52wk)" value={totals.ecommSales} icon={ShoppingBag} tone="amber" />
+        <StatCard
+          label="% of $ In-Store"
+          value={totals.storeSales + totals.ecommSales > 0 ? totals.storeSales / (totals.storeSales + totals.ecommSales) : 0}
+          icon={Percent}
+          tone="slate"
+          suffix="%"
+        />
+      </div>
+
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+        <h3 className="mb-3 text-sm font-semibold text-white">Monthly Trend</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[640px]">
+            <thead>
+              <tr className="border-b border-slate-800">
+                <th className="px-3 py-2 text-left text-[11px] uppercase tracking-wider text-slate-500">Month</th>
+                <th className={thCls}>Store Units</th>
+                <th className={thCls}>Store POS $</th>
+                <th className={thCls}>eComm Units</th>
+                <th className={thCls}>eComm Net $</th>
+                <th className={thCls}>Total $</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byMonth.map((m) => (
+                <tr key={m.month} className="border-b border-slate-800/60">
+                  <td className="px-3 py-2 text-left text-sm text-white">{monthLabel(m.month)}</td>
+                  <td className={tdCls}>{numberFmt(m.storeUnits)}</td>
+                  <td className={tdCls}>{currency(m.storeSales)}</td>
+                  <td className={tdCls}>{numberFmt(m.ecommUnits)}</td>
+                  <td className={tdCls}>{currency(m.ecommSales)}</td>
+                  <td className={cn(tdCls, "font-semibold text-white")}>{currency(m.storeSales + m.ecommSales)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+          <h3 className="text-sm font-semibold text-white">By Item</h3>
+          <FilterSelect
+            label="Month"
+            value={activeMonth}
+            onChange={setSelMonth}
+            options={months.map((m) => ({ value: m, label: monthLabel(m) }))}
+          />
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px]">
+            <thead>
+              <tr className="border-b border-slate-800">
+                <th className="px-3 py-2 text-left text-[11px] uppercase tracking-wider text-slate-500">Item #</th>
+                <th className="px-3 py-2 text-left text-[11px] uppercase tracking-wider text-slate-500">Item</th>
+                <th className={thCls}>Store Units</th>
+                <th className={thCls}>Store POS $</th>
+                <th className={thCls}>eComm Units</th>
+                <th className={thCls}>eComm Net $</th>
+              </tr>
+            </thead>
+            <tbody>
+              {itemsForMonth.map((m) => (
+                <tr key={m.item} className="border-b border-slate-800/60">
+                  <td className="px-3 py-2 text-left text-sm text-slate-400">{m.item}</td>
+                  <td className="px-3 py-2 text-left text-sm text-white">{m.name}</td>
+                  <td className={tdCls}>{numberFmt(m.storeUnits)}</td>
+                  <td className={tdCls}>{currency(m.storeSales)}</td>
+                  <td className={tdCls}>{numberFmt(m.ecommUnits)}</td>
+                  <td className={tdCls}>{currency(m.ecommSales)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+        <h3 className="mb-3 text-sm font-semibold text-white">Recent Weeks (all items)</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[560px]">
+            <thead>
+              <tr className="border-b border-slate-800">
+                <th className="px-3 py-2 text-left text-[11px] uppercase tracking-wider text-slate-500">Week Ending</th>
+                <th className={thCls}>Store Units</th>
+                <th className={thCls}>Store POS $</th>
+                <th className={thCls}>eComm Net $</th>
+                <th className={thCls}>Total $</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentWeeks.map((w) => (
+                <tr key={w.week} className="border-b border-slate-800/60">
+                  <td className="px-3 py-2 text-left text-sm text-white">{w.week}</td>
+                  <td className={tdCls}>{numberFmt(w.storeUnits)}</td>
+                  <td className={tdCls}>{currency(w.storeSales)}</td>
+                  <td className={tdCls}>{currency(w.ecommSales)}</td>
+                  <td className={cn(tdCls, "font-semibold text-white")}>{currency(w.storeSales + w.ecommSales)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function PricingParityPage({ rows = [], snapshotName = "", channels = [] }) {
   const TOLERANCE = 0.05; // 5% — flag prices outside this band of the median
