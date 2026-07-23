@@ -4816,7 +4816,7 @@ function SellThroughPage({ rows = [] }) {
         <StatCard label="eComm Net $ (52wk)" value={totals.ecommSales} icon={ShoppingBag} tone="amber" />
         <StatCard
           label="% of $ In-Store"
-          value={totals.storeSales + totals.ecommSales > 0 ? totals.storeSales / (totals.storeSales + totals.ecommSales) : 0}
+          value={totals.storeSales + totals.ecommSales > 0 ? (totals.storeSales / (totals.storeSales + totals.ecommSales)) * 100 : 0}
           icon={Percent}
           tone="slate"
           suffix="%"
