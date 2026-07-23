@@ -1079,7 +1079,7 @@ function EmptyStateCard({ title, body, requiredSheets, icon: Icon = FileText }) 
         {requiredSheets && requiredSheets.length ? (
           <div className="mt-5 inline-block text-left">
             <p className="text-xs uppercase tracking-wider text-slate-500">
-              Required Google Sheet tabs:
+              Required data feeds:
             </p>
             <ul className="mt-2 space-y-1 text-sm">
               {requiredSheets.map((s) => (
@@ -1828,7 +1828,7 @@ export default function App() {
         setError("");
       } catch (e) {
         setError(
-          "Could not load Google Sheets data. Make sure the sheet is shared as 'Anyone with the link can view'."
+          "Could not load channel data. Please refresh the page — if the issue persists, the data source may be temporarily unavailable."
         );
       } finally {
         setLoading(false);
@@ -2353,7 +2353,7 @@ export default function App() {
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-950 text-white">
-        Loading Google Sheets data...
+        Loading live channel data...
       </div>
     );
   }
@@ -2531,7 +2531,7 @@ export default function App() {
                 {BRAND_NAME} Dashboard
               </h1>
               <p className="mt-2 text-sm text-slate-400">
-                {scopeLabel} · Live from Google Sheets.
+                {scopeLabel} · Live channel data, synced hourly.
               </p>
             </div>
 
