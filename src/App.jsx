@@ -2704,6 +2704,23 @@ export default function App() {
                     {enabledChannels.map((c) => {
                       const months = loadedMonthsByChannel[c.code] || [];
                       const inScope = activeScope.includes(c.code);
+                      let detail;
+                      if (months.length) {
+                        detail = `${months.length} months loaded · latest ${ymToShort(months[0])}`;
+                      } else if (c.code === "wmt1p") {
+                        const stWeeks = new Set(
+                          (wmt1pSellthroughSheet || []).map((r) => String(pick(r, ["week_ending", "Week Ending"], "")))
+                        ).size;
+                        const adRows = Array.isArray(wmt1pCampaigns30) ? wmt1pCampaigns30.length : 0;
+                        const parts = [];
+                        if (stWeeks > 1) parts.push(`Sell-through: ${stWeeks} weeks`);
+                        if (adRows > 0) parts.push("ads live");
+                        detail = parts.length ? parts.join(" · ") : "No sales data yet";
+                      } else if (c.code === "shopify") {
+                        detail = "Pipeline connected · data syncing";
+                      } else {
+                        detail = "No settlement data yet";
+                      }
                       return (
                         <div
                           key={c.code}
@@ -2715,11 +2732,7 @@ export default function App() {
                           )}
                         >
                           <p className="text-sm font-medium text-white">{c.name}</p>
-                          <p className="mt-1 text-xs text-slate-400">
-                            {months.length
-                              ? `${months.length} months loaded · latest ${ymToShort(months[0])}`
-                              : "No settlement data yet"}
-                          </p>
+                          <p className="mt-1 text-xs text-slate-400">{detail}</p>
                         </div>
                       );
                     })}
