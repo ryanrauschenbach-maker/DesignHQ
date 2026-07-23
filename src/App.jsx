@@ -218,7 +218,20 @@ async function fetchSheet(tabName) {
     const res = await fetch(getSheetUrl(tabName));
     if (!res.ok) return [];
     const text = await res.text();
-    return parseGviz(text);
+    const rows = parseGviz(text);
+    // gviz quirk: requesting a tab that doesn't exist silently returns gid 0
+    // (channel_config). Treat that as "tab missing" for any other tab name, so
+    // phantom tabs (e.g. amzsc_buybox_* months that were never created) don't
+    // register as loaded data.
+    if (
+      tabName !== TAB_NAMES.channelConfig &&
+      rows.length > 0 &&
+      rows[0] &&
+      Object.prototype.hasOwnProperty.call(rows[0], "channel_code")
+    ) {
+      return [];
+    }
+    return rows;
   } catch {
     return [];
   }
@@ -952,7 +965,9 @@ function StatCard({ label, value, icon: Icon, tone = "cyan", suffix }) {
     slate: "border-slate-700 bg-slate-900 text-slate-300",
   }[tone];
   const display =
-    suffix === "%" ? pct(value) : suffix === "count" ? numberFmt(value) : currency(value);
+    typeof value === "string"
+      ? value
+      : suffix === "%" ? pct(value) : suffix === "count" ? numberFmt(value) : currency(value);
   return (
     <div className={cn("rounded-2xl border p-4", toneRing)}>
       <div className="flex items-center justify-between">
@@ -1894,9 +1909,16 @@ export default function App() {
   }, [settlementByMonth, activeScope, SHARED_ACCOUNT_CHANNELS, cogsMap, cogsAsinSet]);
   const fixedCosts = useMemo(() => parseFixedCostsMonthly(fixedCostsSheet), [fixedCostsSheet]);
 
+  // Amazon SP/SB/SD campaign tabs are amzsc-only data — only charge that ad
+  // spend to the P&L / Overview when Amazon SC is actually in scope. Walmart
+  // ad data lives in the wmt*_campaigns_* tabs (30d snapshots, not monthly)
+  // and is surfaced in Campaign Trends / Search Terms instead.
   const adSpendCurrentMonth = useMemo(
-    () => sumAdSpendFromCampaigns(spCampaigns, sbCampaigns, sdCampaigns),
-    [spCampaigns, sbCampaigns, sdCampaigns]
+    () =>
+      activeScope.includes("amzsc")
+        ? sumAdSpendFromCampaigns(spCampaigns, sbCampaigns, sdCampaigns)
+        : 0,
+    [activeScope, spCampaigns, sbCampaigns, sdCampaigns]
   );
 
   const pnl = useMemo(() => {
@@ -2326,7 +2348,7 @@ export default function App() {
   const scopeLabel = activeScope.length === 1
     ? activeScope[0] === "amzsc" ? "Amazon SC" : activeScope[0]
     : activeScope.length === 2 && activeScope.includes("amzsc") && activeScope.includes("amzvc") ? "Amazon Combined"
-    : activeScope.length === 3 && activeScope.includes("wmt1p") && activeScope.includes("wmt3p") && activeScope.includes("wmtother") ? "Walmart Combined"
+    : activeScope.length > 1 && activeScope.every((c) => c.startsWith("wmt")) ? "Walmart Combined"
     : `${activeScope.length} channels`;
 
   return (
